@@ -1,0 +1,301 @@
+# Innotech Genesis II bridge: full worked example (LilyGO T-RSS3, ESP32-S3).
+#
+# This is a real config from one site with four controllers (two of them AHU controllers with
+# 15 zones between them). Block numbers come from each controller's own program, so yours will differ:
+# flash the generic firmware (innotech-genesis.yaml), press the "Scan controller N blocks" buttons and read the
+# block list in the ESPHome log, then change the numbers below to match.
+#
+# What it shows off
+#   * Each zone as a thermostat: current temp, setpoint, action (heating / cooling / fan / off), and an Off mode
+#     that forces the AHU's supply fan off. Separate "fan force on" buttons.
+#   * Cooling / heating demand per zone (the zone PID loop outputs), CHW valve %, fan status, after hours,
+#     fire alarm inputs.
+#   * transport: auto. Uses the serial bus when a controller answers on it, otherwise connects to an iComm
+#     server over TCP like Supervisor does (set icomm_hosts), and re-checks the serial bus every 10 min.
+#
+# Wiring options (pick one in `innotech_genesis: uart_id:`)
+#   * uart_rs485 -> the controllers' NET +/-/SCN terminals.
+#     Don't leave another bus master (e.g. an iComm server's CONV232) on the bus at the same time unless `polling: false`.
+#   * uart_rs232 -> one controller's front DB9 port (that controller only; it drops off the Net while it's used).
+#
+# Protocol notes: docs/PROTOCOL.md. Block numbers below = controller sequence numbers (iComm web block id + 1).
+
+substitutions:
+  name: innotech-genesis
+  friendly_name: Innotech Genesis
+
+esphome:
+  name: ${name}
+  friendly_name: ${friendly_name}
+  comment: Innotech Genesis II BMS bridge (LilyGO T-RSS3)
+
+esp32:
+  board: esp32-s3-devkitc-1
+  variant: esp32s3
+  framework:
+    type: esp-idf
+
+external_components:
+  - source:
+      type: local
+      path: components
+    components: [innotech_genesis]
+
+# Logs go to UART0 (GPIO43/44, unused) and over Wi-Fi (HA / web page), NOT the USB port: with the board on a
+# PC's USB, the USB-serial-JTAG driver repeatedly hit an interrupt-watchdog storm (18 Nov 2026) that also
+# boot-looped it, since a software reset doesn't reset that peripheral. USB still works for flashing.
+logger:
+  level: DEBUG
+  hardware_uart: UART0
+
+api:
+
+web_server:
+
+ota:
+  platform: esphome
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap: {}
+
+captive_portal:
+
+uart:
+  - id: uart_rs485
+    tx_pin: GPIO3
+    rx_pin: GPIO2
+    baud_rate: 9600
+    rx_buffer_size: 1024
+  - id: uart_rs232
+    tx_pin: GPIO41
+    rx_pin: GPIO42
+    baud_rate: 9600
+    rx_buffer_size: 1024
+
+innotech_genesis:
+  - id: genesis
+    uart_id: uart_rs485
+    flow_control_pin: GPIO4  # RS485 driver enable (only used with uart_rs485)
+    tcp_port: 10001
+    update_interval: 5s
+    status_interval: 60s
+    reply_timeout: 1000ms
+    max_points_per_message: 20
+    save_to_flash: true
+    devices: [1, 2, 3, 4]
+    # auto = use the serial bus when a controller answers on it, otherwise subscribe through iComm like
+    # Supervisor does (and re-check the serial bus every 10 min). Force with `serial` or `icomm`.
+    transport: auto
+    icomm_hosts:
+      - 192.168.1.10   # your iComm server (only used when no controller answers on the serial bus)
+    # icomm_name: "ESPHome DDC1 plant room"  # name shown in iComm's Current Applications (default adds the MAC)
+
+# --------------------------------------------------------------------------- status LED (WS2812 on GPIO1)
+#   serial bus: green = all controllers, yellow = some, red = none
+#   via iComm server: blue = connected with live data, orange = connected but no controller alive, red = not connected
+#   purple = something (iComm/Supervisor) is using the TCP bridge; brief white blink = traffic
+light:
+  - platform: esp32_rmt_led_strip
+    id: status_led
+    name: Status LED
+    pin: GPIO1
+    num_leds: 1
+    channel_colors: GRB
+    chipset: WS2812
+    default_transition_length: 0s
+    entity_category: config
+
+interval:
+  - interval: 150ms
+    then:
+      - lambda: |-
+          static uint32_t last = 0xFFFFFFFF;
+          if (!id(status_led).remote_values.is_on() && last != 0xFFFFFFFF) return;  // user turned it off
+          uint32_t c;
+          if (millis() - id(genesis).last_activity() < 120) c = 0xFFFFFF;
+          else if (id(genesis).tcp_client_connected()) c = 0x8000FF;
+          else if (id(genesis).using_icomm()) c = !id(genesis).icomm_connected() ? 0xFF0000 : (id(genesis).any_alive() ? 0x0040FF : 0xFF6000);
+          else if (id(genesis).all_alive()) c = 0x00FF00;
+          else if (id(genesis).any_alive()) c = 0xFFA000;
+          else c = 0xFF0000;
+          if (c == last) return;
+          last = c;
+          auto call = id(status_led).turn_on();
+          call.set_rgb(((c >> 16) & 0xFF) / 255.0f, ((c >> 8) & 0xFF) / 255.0f, (c & 0xFF) / 255.0f);
+          call.set_brightness(0.25);
+          call.set_transition_length(0);
+          call.perform();
+
+# --------------------------------------------------------------------------- controller health
+binary_sensor:
+  - platform: template
+    name: Using iComm server
+    lambda: return id(genesis).using_icomm();
+    entity_category: diagnostic
+  - platform: template
+    name: iComm connected
+    lambda: return id(genesis).icomm_connected();
+    device_class: connectivity
+    entity_category: diagnostic
+  - platform: innotech_genesis
+    type: online
+    address: 1
+    name: "DDC1 online"
+    device_class: connectivity
+  - platform: innotech_genesis
+    type: online
+    address: 2
+    name: "DDC2 online"
+    device_class: connectivity
+  - platform: innotech_genesis
+    type: online
+    address: 3
+    name: "DDC3 online"
+    device_class: connectivity
+  - platform: innotech_genesis
+    type: online
+    address: 4
+    name: "DDC4 online"
+    device_class: connectivity
+
+  # Supply fan status (digital inputs) and requests (digital outputs)
+  - { platform: innotech_genesis, address: 3, block: 10, name: "AHU1 supply fan status", device_class: running }
+  - { platform: innotech_genesis, address: 3, block: 103, name: "AHU1 supply fan request" }
+  - { platform: innotech_genesis, address: 3, block: 21, name: "AHU2 supply fan status", device_class: running }
+  - { platform: innotech_genesis, address: 3, block: 106, name: "AHU2 supply fan request" }
+  - { platform: innotech_genesis, address: 4, block: 8, name: "AHU3 supply fan status", device_class: running }
+  - { platform: innotech_genesis, address: 4, block: 31, name: "AHU3 supply fan request" }
+  - { platform: innotech_genesis, address: 4, block: 18, name: "AHU4 supply fan status", device_class: running }
+  - { platform: innotech_genesis, address: 4, block: 61, name: "AHU4 supply fan request" }
+
+  # Fire alarm inputs: the fire panel's AHU shutdown signal into each controller (DI "AHU n FIRE ALARM").
+  # On = the fire panel is telling that AHU to stop; the controller's Alarm block and interlock act on it.
+  - { platform: innotech_genesis, address: 3, block: 11, name: "AHU1 fire alarm", device_class: safety }
+  - { platform: innotech_genesis, address: 3, block: 22, name: "AHU2 fire alarm", device_class: safety }
+  - { platform: innotech_genesis, address: 4, block: 9, name: "AHU3 fire alarm", device_class: safety }
+  - { platform: innotech_genesis, address: 4, block: 19, name: "AHU4 fire alarm", device_class: safety }
+
+  # After hours active: the timed Latch the wall panel's AFTER HRS button sets (TimerValue 2, i.e. 2 h run).
+  # Read-only; the button input itself can't be forced.
+  - { platform: innotech_genesis, address: 3, block: 28, name: "AHU1 after hours", icon: "mdi:clock-plus-outline" }
+  - { platform: innotech_genesis, address: 3, block: 56, name: "AHU2 after hours", icon: "mdi:clock-plus-outline" }
+  - { platform: innotech_genesis, address: 4, block: 28, name: "AHU3 after hours", icon: "mdi:clock-plus-outline" }
+  - { platform: innotech_genesis, address: 4, block: 58, name: "AHU4 after hours", icon: "mdi:clock-plus-outline" }
+
+# --------------------------------------------------------------------------- valves and DDC1 temperatures
+sensor:
+  # DDC1 (block numbers from a serial capture; confirm with the scan button)
+  - { platform: innotech_genesis, address: 1, block: 4, name: "DDC1 temp block 4", unit_of_measurement: "°C", device_class: temperature, state_class: measurement }
+  - { platform: innotech_genesis, address: 1, block: 9, name: "DDC1 temp block 9", unit_of_measurement: "°C", device_class: temperature, state_class: measurement }
+  - { platform: innotech_genesis, address: 1, block: 11, name: "DDC1 temp block 11", unit_of_measurement: "°C", device_class: temperature, state_class: measurement }
+
+  # DDC3
+  - { platform: innotech_genesis, address: 3, block: 127, name: "AHU1 CHW valve", unit_of_measurement: "%", state_class: measurement }
+  - { platform: innotech_genesis, address: 3, block: 95, name: "AHU2 CHW valve", unit_of_measurement: "%", state_class: measurement }
+
+  # DDC4
+  - { platform: innotech_genesis, address: 4, block: 50, name: "AHU3 CHW valve", unit_of_measurement: "%", state_class: measurement }
+  - { platform: innotech_genesis, address: 4, block: 82, name: "AHU4 CHW valve", unit_of_measurement: "%", state_class: measurement }
+
+  # Zone cooling / heating demand (0-100 %) = the zone PID loop's Direct / Reverse outputs. Cooling demand
+  # drives the AHU's CHW valve (valve = (hottest zone - 30) / 70); heating demand switches the zone's duct heaters.
+  - { platform: innotech_genesis, address: 3, block: 47, output: 1, icomm_field: Direct, name: "AHU1 zone 1 cooling demand", unit_of_measurement: "%", state_class: measurement, accuracy_decimals: 0, icon: "mdi:snowflake", filters: [{ delta: 1.0 }] }
+  - { platform: innotech_genesis, address: 3, block: 47, output: 2, icomm_field: Reverse, name: "AHU1 zone 1 heating demand", unit_of_measurement: "%", state_class: measurement, accuracy_decimals: 0, icon: "mdi:fire", filters: [{ delta: 1.0 }] }
+  - { platform: innotech_genesis, address: 3, block: 42, output: 1, icomm_field: Direct, name: "AHU1 zone 2 cooling demand", unit_of_measurement: "%", state_class: measurement, accuracy_decimals: 0, icon: "mdi:snowflake", filters: [{ delta: 1.0 }] }
+  - { platform: innotech_genesis, address: 3, block: 42, output: 2, icomm_field: Reverse, name: "AHU1 zone 2 heating demand", unit_of_measurement: "%", state_class: measurement, accuracy_decimals: 0, icon: "mdi:fire", filters: [{ delta: 1.0 }] }
+  - { platform: innotech_genesis, address: 3, block: 36, output: 1, icomm_field: Direct, name: "AHU1 zone 3 cooling demand", unit_of_measurement: "%", state_class: measurement, accuracy_decimals: 0, icon: "mdi:snowflake", filters: [{ delta: 1.0 }] }
+  - { platform: innotech_genesis, address: 3, block: 36, output: 2, icomm_field: Reverse, name: "AHU1 zone 3 heating demand", unit_of_measurement: "%", state_class: measurement, accuracy_decimals: 0, icon: "mdi:fire", filters: [{ delta: 1.0 }] }
+  - { platform: innotech_genesis, address: 3, block: 31, output: 1, icomm_field: Direct, name: "AHU1 zone 4 cooling demand", unit_of_measurement: "%", state_class: measurement, accuracy_decimals: 0, icon: "mdi:snowflake", filters: [{ delta: 1.0 }] }
+  - { platform: innotech_genesis, address: 3, block: 31, output: 2, icomm_field: Reverse, name: "AHU1 zone 4 heating demand", unit_of_measurement: "%", state_class: measurement, accuracy_decimals: 0, icon: "mdi:fire", filters: [{ delta: 1.0 }] }
+  - { platform: innotech_genesis, address: 3, block: 76, output: 1, icomm_field: Direct, name: "AHU2 zone 1 cooling demand", unit_of_measurement: "%", state_class: measurement, accuracy_decimals: 0, icon: "mdi:snowflake", filters: [{ delta: 1.0 }] }
+  - { platform: innotech_genesis, address: 3, block: 76, output: 2, icomm_field: Reverse, name: "AHU2 zone 1 heating demand", unit_of_measurement: "%", state_class: measurement, accuracy_decimals: 0, icon: "mdi:fire", filters: [{ delta: 1.0 }] }
+  - { platform: innotech_genesis, address: 3, block: 70, output: 1, icomm_field: Direct, name: "AHU2 zone 2 cooling demand", unit_of_measurement: "%", state_class: measurement, accuracy_decimals: 0, icon: "mdi:snowflake", filters: [{ delta: 1.0 }] }
+  - { platform: innotech_genesis, address: 3, block: 70, output: 2, icomm_field: Reverse, name: "AHU2 zone 2 heating demand", unit_of_measurement: "%", state_class: measurement, accuracy_decimals: 0, icon: "mdi:fire", filters: [{ delta: 1.0 }] }
+  - { platform: innotech_genesis, address: 3, block: 64, output: 1, icomm_field: Direct, name: "AHU2 zone 3 cooling demand", unit_of_measurement: "%", state_class: measurement, accuracy_decimals: 0, icon: "mdi:snowflake", filters: [{ delta: 1.0 }] }
+  - { platform: innotech_genesis, address: 3, block: 64, output: 2, icomm_field: Reverse, name: "AHU2 zone 3 heating demand", unit_of_measurement: "%", state_class: measurement, accuracy_decimals: 0, icon: "mdi:fire", filters: [{ delta: 1.0 }] }
+  - { platform: innotech_genesis, address: 3, block: 59, output: 1, icomm_field: Direct, name: "AHU2 zone 4 cooling demand", unit_of_measurement: "%", state_class: measurement, accuracy_decimals: 0, icon: "mdi:snowflake", filters: [{ delta: 1.0 }] }
+  - { platform: innotech_genesis, address: 3, block: 59, output: 2, icomm_field: Reverse, name: "AHU2 zone 4 heating demand", unit_of_measurement: "%", state_class: measurement, accuracy_decimals: 0, icon: "mdi:fire", filters: [{ delta: 1.0 }] }
+  - { platform: innotech_genesis, address: 3, block: 93, output: 1, icomm_field: Direct, name: "AHU2 zone 5 cooling demand", unit_of_measurement: "%", state_class: measurement, accuracy_decimals: 0, icon: "mdi:snowflake", filters: [{ delta: 1.0 }] }
+  - { platform: innotech_genesis, address: 3, block: 93, output: 2, icomm_field: Reverse, name: "AHU2 zone 5 heating demand", unit_of_measurement: "%", state_class: measurement, accuracy_decimals: 0, icon: "mdi:fire", filters: [{ delta: 1.0 }] }
+  - { platform: innotech_genesis, address: 4, block: 36, output: 1, icomm_field: Direct, name: "AHU3 zone 1 cooling demand", unit_of_measurement: "%", state_class: measurement, accuracy_decimals: 0, icon: "mdi:snowflake", filters: [{ delta: 1.0 }] }
+  - { platform: innotech_genesis, address: 4, block: 36, output: 2, icomm_field: Reverse, name: "AHU3 zone 1 heating demand", unit_of_measurement: "%", state_class: measurement, accuracy_decimals: 0, icon: "mdi:fire", filters: [{ delta: 1.0 }] }
+  - { platform: innotech_genesis, address: 4, block: 42, output: 1, icomm_field: Direct, name: "AHU3 zone 2 cooling demand", unit_of_measurement: "%", state_class: measurement, accuracy_decimals: 0, icon: "mdi:snowflake", filters: [{ delta: 1.0 }] }
+  - { platform: innotech_genesis, address: 4, block: 42, output: 2, icomm_field: Reverse, name: "AHU3 zone 2 heating demand", unit_of_measurement: "%", state_class: measurement, accuracy_decimals: 0, icon: "mdi:fire", filters: [{ delta: 1.0 }] }
+  - { platform: innotech_genesis, address: 4, block: 48, output: 1, icomm_field: Direct, name: "AHU3 zone 3 cooling demand", unit_of_measurement: "%", state_class: measurement, accuracy_decimals: 0, icon: "mdi:snowflake", filters: [{ delta: 1.0 }] }
+  - { platform: innotech_genesis, address: 4, block: 48, output: 2, icomm_field: Reverse, name: "AHU3 zone 3 heating demand", unit_of_measurement: "%", state_class: measurement, accuracy_decimals: 0, icon: "mdi:fire", filters: [{ delta: 1.0 }] }
+  - { platform: innotech_genesis, address: 4, block: 66, output: 1, icomm_field: Direct, name: "AHU4 zone 1 cooling demand", unit_of_measurement: "%", state_class: measurement, accuracy_decimals: 0, icon: "mdi:snowflake", filters: [{ delta: 1.0 }] }
+  - { platform: innotech_genesis, address: 4, block: 66, output: 2, icomm_field: Reverse, name: "AHU4 zone 1 heating demand", unit_of_measurement: "%", state_class: measurement, accuracy_decimals: 0, icon: "mdi:fire", filters: [{ delta: 1.0 }] }
+  - { platform: innotech_genesis, address: 4, block: 72, output: 1, icomm_field: Direct, name: "AHU4 zone 2 cooling demand", unit_of_measurement: "%", state_class: measurement, accuracy_decimals: 0, icon: "mdi:snowflake", filters: [{ delta: 1.0 }] }
+  - { platform: innotech_genesis, address: 4, block: 72, output: 2, icomm_field: Reverse, name: "AHU4 zone 2 heating demand", unit_of_measurement: "%", state_class: measurement, accuracy_decimals: 0, icon: "mdi:fire", filters: [{ delta: 1.0 }] }
+  - { platform: innotech_genesis, address: 4, block: 78, output: 1, icomm_field: Direct, name: "AHU4 zone 3 cooling demand", unit_of_measurement: "%", state_class: measurement, accuracy_decimals: 0, icon: "mdi:snowflake", filters: [{ delta: 1.0 }] }
+  - { platform: innotech_genesis, address: 4, block: 78, output: 2, icomm_field: Reverse, name: "AHU4 zone 3 heating demand", unit_of_measurement: "%", state_class: measurement, accuracy_decimals: 0, icon: "mdi:fire", filters: [{ delta: 1.0 }] }
+
+  # Bridge diagnostics
+  - platform: template
+    name: Bus frames received
+    lambda: return id(genesis).frames_ok();
+    update_interval: 60s
+    accuracy_decimals: 0
+    state_class: total_increasing
+    entity_category: diagnostic
+  - platform: template
+    name: Bus timeouts
+    lambda: return id(genesis).timeouts();
+    update_interval: 60s
+    accuracy_decimals: 0
+    state_class: total_increasing
+    entity_category: diagnostic
+  - platform: wifi_signal
+    name: WiFi signal
+    update_interval: 60s
+  - platform: uptime
+    name: Uptime
+
+# --------------------------------------------------------------------------- zones as thermostats
+# current = zone temperature block, target = zone setpoint (User Variable) block; the AHU's chilled-water
+# valve and supply-fan status drive the action (cooling / idle / off). Auto = the panel's weekly schedules and
+# after-hours switches decide when each AHU runs. Off = force the AHU's supply-fan output (fan_output_block)
+# off; it applies to every zone on that AHU and stays until set back to Auto. The "fan force on" buttons force
+# it on instead (bypassing schedule, after-hours switch and fire-alarm logic); those zones then show Fan only
+# until one is set to Auto or Off.
+climate:
+  # AHU1 (DDC3)
+  - { platform: innotech_genesis, name: "AHU1 zone 1", address: 3, temperature_block: 2, setpoint_block: 3, valve_block: 127, fan_block: 10, fan_output_block: 103, heater_blocks: [51, 49] }
+  - { platform: innotech_genesis, name: "AHU1 zone 2", address: 3, temperature_block: 4, setpoint_block: 5, valve_block: 127, fan_block: 10, fan_output_block: 103, heater_blocks: [46, 44] }
+  - { platform: innotech_genesis, name: "AHU1 zone 3", address: 3, temperature_block: 6, setpoint_block: 7, valve_block: 127, fan_block: 10, fan_output_block: 103, heater_blocks: [40, 38] }
+  - { platform: innotech_genesis, name: "AHU1 zone 4", address: 3, temperature_block: 8, setpoint_block: 9, valve_block: 127, fan_block: 10, fan_output_block: 103, heater_blocks: [35, 33] }
+  # AHU2 (DDC3)
+  - { platform: innotech_genesis, name: "AHU2 zone 1", address: 3, temperature_block: 13, setpoint_block: 14, valve_block: 95, fan_block: 21, fan_output_block: 106, heater_blocks: [80, 78] }
+  - { platform: innotech_genesis, name: "AHU2 zone 2", address: 3, temperature_block: 15, setpoint_block: 16, valve_block: 95, fan_block: 21, fan_output_block: 106, heater_blocks: [74, 72] }
+  - { platform: innotech_genesis, name: "AHU2 zone 3", address: 3, temperature_block: 17, setpoint_block: 18, valve_block: 95, fan_block: 21, fan_output_block: 106, heater_blocks: [68, 66] }
+  - { platform: innotech_genesis, name: "AHU2 zone 4", address: 3, temperature_block: 19, setpoint_block: 20, valve_block: 95, fan_block: 21, fan_output_block: 106, heater_blocks: [63, 61] }
+  - { platform: innotech_genesis, name: "AHU2 zone 5", address: 3, temperature_block: 91, setpoint_block: 92, valve_block: 95, fan_block: 21, fan_output_block: 106, heater_blocks: [98, 101] }
+  # AHU3 (DDC4)
+  - { platform: innotech_genesis, name: "AHU3 zone 1", address: 4, temperature_block: 2, setpoint_block: 3, valve_block: 50, fan_block: 8, fan_output_block: 31, heater_blocks: [39, 41] }
+  - { platform: innotech_genesis, name: "AHU3 zone 2", address: 4, temperature_block: 4, setpoint_block: 5, valve_block: 50, fan_block: 8, fan_output_block: 31, heater_blocks: [45, 47] }
+  - { platform: innotech_genesis, name: "AHU3 zone 3", address: 4, temperature_block: 6, setpoint_block: 7, valve_block: 50, fan_block: 8, fan_output_block: 31, heater_blocks: [54, 56] }
+  # AHU4 (DDC4)
+  - { platform: innotech_genesis, name: "AHU4 zone 1", address: 4, temperature_block: 12, setpoint_block: 13, valve_block: 82, fan_block: 18, fan_output_block: 61, heater_blocks: [69, 71] }
+  - { platform: innotech_genesis, name: "AHU4 zone 2", address: 4, temperature_block: 14, setpoint_block: 15, valve_block: 82, fan_block: 18, fan_output_block: 61, heater_blocks: [75, 77] }
+  - { platform: innotech_genesis, name: "AHU4 zone 3", address: 4, temperature_block: 16, setpoint_block: 17, valve_block: 82, fan_block: 18, fan_output_block: 61, heater_blocks: [86, 88] }
+
+# --------------------------------------------------------------------------- other User Variable blocks
+number:
+  - { platform: innotech_genesis, address: 1, block: 5, name: "AHU8 setpoint", unit_of_measurement: "°C", mode: box }
+  - { platform: innotech_genesis, address: 1, block: 21, name: "DDC1 after-hours timer", unit_of_measurement: "h", min_value: 0, max_value: 12, step: 0.1, mode: box }
+
+# --------------------------------------------------------------------------- block discovery (results go to the log)
+button:
+  - { platform: innotech_genesis, address: 1, name: "Scan DDC1 blocks", entity_category: diagnostic }
+  - { platform: innotech_genesis, address: 2, name: "Scan DDC2 blocks", entity_category: diagnostic }
+  - { platform: innotech_genesis, address: 3, name: "Scan DDC3 blocks", entity_category: diagnostic }
+  - { platform: innotech_genesis, address: 4, name: "Scan DDC4 blocks", entity_category: diagnostic }
+  # Supply-fan force ON (see the climate notes above). Release with Auto on any of that AHU's zones.
+  - { platform: innotech_genesis, type: force_on, address: 3, output_block: 103, name: "AHU1 fan force on" }
+  - { platform: innotech_genesis, type: force_on, address: 3, output_block: 106, name: "AHU2 fan force on" }
+  - { platform: innotech_genesis, type: force_on, address: 4, output_block: 31, name: "AHU3 fan force on" }
+  - { platform: innotech_genesis, type: force_on, address: 4, output_block: 61, name: "AHU4 fan force on" }
+  - platform: restart
+    name: Restart

@@ -1,0 +1,43 @@
+name: Build firmware
+
+on:
+  release:
+    types: [published]
+  pull_request:
+    paths: ["esphome/**", ".github/workflows/release.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build ESPHome firmware
+        id: esphome
+        uses: esphome/build-action@v8.1.0
+        with:
+          yaml-file: esphome/innotech-genesis.yaml
+          version: 2026.10.2
+
+      - name: Collect binaries
+        run: |
+          mkdir dist
+          src="${{ steps.esphome.outputs.name }}"
+          cp "$src/$src.factory.bin" dist/innotech-genesis-t-rss3.factory.bin
+          cp "$src/$src.ota.bin" dist/innotech-genesis-t-rss3.ota.bin
+          ls -l dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: firmware
+          path: dist
+
+      - name: Attach to release
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ github.event.release.tag_name }}" dist/* --clobber

@@ -1,188 +1,64 @@
-# Innotech Genesis / Maxim Protocol
+# Innotech Genesis
 
-Partially reverse-engineered TCP protocol for controlling Innotech air conditioning systems via the iComm interface. Data captured via packet capture of the [Supervisor Software](https://innotech.com/Products/ProductDetails.aspx?prodid=81) (V5.40) communicating with a Genesis II board.
+ESPHome firmware and protocol notes for Innotech Genesis II BMS controllers (the DDCs that run a lot of older commercial air conditioning). It started as packet captures of the Supervisor software talking to iComm, and it's grown into an ESP32 that talks to the controllers directly, so you don't need the old Windows PC running iComm anymore.
 
-## Overview
+Innotech don't support this gear or offer the software anymore, so hopefully this helps someone else keep theirs going.
 
-This repository contains a Node-RED flow for controlling Innotech AC units by replaying and constructing TCP packets that mimic the Supervisor software. The temperature setpoint encoding was reverse-engineered; everything else (on/off schedules, keepalive) was manually captured from Supervisor traffic.
+## What it can do
 
-**Note:** This protocol documentation is incomplete. Only the portions that have been captured and/or reverse-engineered are documented here.
+- Each zone as a thermostat in Home Assistant: current temp, setpoint, and whether it's heating, cooling, just running the fan or off
+- Turn an AHU off by forcing its supply fan off (instead of blanking its weekly schedule), and back to Auto to hand it back to the schedule
+- A separate "fan force on" button per AHU, for when you really need it running
+- Cooling and heating demand per zone, chilled water valve %, fan status, after hours and fire alarm inputs
+- Scan a controller and log every block (number, type, name, values), which is how you find the block numbers for your site
+- Talk to the bus directly over RS485, or through an existing iComm server over TCP like Supervisor does, or switch between the two automatically
+- A TCP bridge on port 10001 so iComm and Supervisor can still reach the bus through the ESP
 
----
+## Hardware
 
-## Protocol Basics
+I'm using a [LilyGO T-RSS3](https://github.com/Xinyuan-LilyGO/T-RSS3) (ESP32-S3 with isolated RS485 and RS232). It runs off 7 to 24 V DC.
 
-### Communication
+- **RS485:** A/B/GND to the controllers' NET +/-/SCN terminals. Don't leave another bus master on the same bus (like an iComm server's CONV232 converter) unless you set `polling: false`.
+- **RS232:** a controller's front DB9 port also works, but only for that one controller, and it drops off the Net while it's plugged in.
 
-- **Transport:** TCP
-- **Port:** 20000
-- **IP:** The IP address of the iComm controller (e.g., `192.168.1.10`)
-- **Web Interface:** Port 8080 (e.g., `http://192.168.1.10:8080/iComm/Connection`)
+## Getting started
 
-### Hardware
+1. Download `innotech-genesis-t-rss3.factory.bin` from the [latest release](../../releases/latest) and flash it over USB with [ESPHome Web](https://web.esphome.io).
+2. It starts a hotspot called `innotech-genesis-xxxxxx`. Join it and pick your Wi-Fi.
+3. Home Assistant should discover it. Add it and you'll see which controllers are online.
+4. Press the "Scan controller N blocks" buttons and read the block list in the ESPHome log.
+5. Copy [`esphome/example-full.yaml`](esphome/example-full.yaml), change the block numbers to match your scan, and build it in the ESPHome dashboard. Pull the component straight from this repo:
 
-- **Controller:** Innotech Genesis II
-- **Interface:** iComm (SW v2.38)
-- **Management Software:** Supervisor V5.40
-
-### Magic Bytes
-
-All observed packets begin with the bytes `78 56` (`xV` in ASCII). This appears to be a protocol identifier/magic header.
-
-### Observed Command Types
-
-The bytes following the `78 56` header indicate the command type:
-
-| Bytes | Purpose |
-|-------|---------|
-| `78 56 48 00` | Hello / keepalive |
-| `78 56 3f 00` | Temperature setpoint write |
-| `78 56 0d 00` | Schedule write trailer / delimiter |
-
----
-
-## Keepalive / Hello Packet
-
-A hello packet is sent every 30 seconds to maintain the TCP connection. It identifies the client as Supervisor:
-
-```
-78 56 48 00 11 00 01 00 00 00 0a 00 53 75 70 65
-72 76 69 73 6f 72 20 56 35 2e 34 31 48 00 ...
+```yaml
+external_components:
+  - source: github://BenJamesAndo/innotech-genesis@main
+    components: [innotech_genesis]
 ```
 
-The packet contains the ASCII string `Supervisor V5.41` followed by null padding for the Name and `HOMEASSISTANT` as the Host Name.
+If you've got more than one, give each a name for iComm's Current Applications list with `icomm_name: "ESPHome DDC1 plant room"`. Otherwise it uses the device name plus the end of the MAC address.
 
----
+## How it talks to the controllers
 
-## Temperature Setpoint (Reverse-Engineered)
+The controllers speak a framed serial protocol on their RS485 "Net" at 9600 baud: `FF FF FF FF 22 DD`, a 9 byte header, CRC-16/ARC, the data, another CRC. Reading and writing a block is the same on serial and through iComm, because iComm will pass raw bus commands straight through (message type 7). That's what Gen2Xtract uses to pull logs.
 
-This is the only part of the protocol that was genuinely reverse-engineered rather than simply captured.
+Live values come from polling on serial, or from iComm's subscriptions over TCP.
 
-### Encoding
+A few things I found along the way:
 
-Temperature values are encoded as **IEEE 754 double-precision floating-point numbers in little-endian byte order** (8 bytes), appended to a zone-specific header.
+- Over iComm, field writes rewrite the whole block from iComm's cached copy, which can quietly change other settings. The ESP reads and patches the actual block instead.
+- Don't send save-to-flash through iComm. The controller goes quiet while it saves and iComm marks it Dead for about 3 minutes.
+- A digital output's `Forced` / `ForceValue` fields are the manual override. Supervisor has a dialog for it, but only if the output is on one of your watch pages.
 
-### Packet Structure
+All the details are in [`docs/PROTOCOL.md`](docs/PROTOCOL.md).
 
-```
-[zone-specific header] [8-byte temperature as IEEE 754 double LE]
-```
+## Tools
 
-The zone-specific headers begin with `78 56 3f 00 06 00` followed by bytes that identify the AHU and zone. These headers also contain internal Supervisor data path references (service names, IO references, etc.) as embedded ASCII strings.
+[`tools/`](tools) has the Python scripts I used for the reverse engineering: the frame codec, decoders for serial port monitor exports and pcaps, a small iComm client, a raw request tool, a TCP relay for testing, and decoders for Gen2Xtract's log downloads. Set `ICOMM_HOST` (and `ICOMM_PASSWORD` for the web one) to point them at your iComm server.
 
-### Temperature Encoding Examples
+## Node-RED (the original approach)
 
-| Temperature | IEEE 754 Double LE (hex) |
-|-------------|--------------------------|
-| 15.0°C | `00 00 00 00 00 00 2e 40` |
-| 15.5°C | `00 00 00 00 00 00 2f 40` |
-| 16.0°C | `00 00 00 00 00 00 30 40` |
-| 20.0°C | `00 00 00 00 00 00 34 40` |
-| 23.5°C | `00 00 00 00 00 80 37 40` |
-| 25.0°C | `00 00 00 00 00 00 39 40` |
-| 30.0°C | `00 00 00 00 00 00 3e 40` |
+Before the ESPHome firmware I controlled it from Node-RED by replaying captured Supervisor packets to iComm on TCP 20000: setpoints were built from a captured header plus the temperature as a little endian double, and on/off was done by writing or blanking the weekly schedule. The flow is still in [`Node-RED flows/`](Node-RED%20flows) and exposes the AC to Home Assistant with `node-red-contrib-ha-mqtt`. It needs `node-red-contrib-string-to-hex` as well.
 
-### Supported Range
-
-- **Minimum:** 15.0°C
-- **Maximum:** 30.0°C
-- **Increment:** 0.5°C steps (0.1°C steps are also possible)
-
-### AHU / Zone Mapping
-
-Each AHU and zone combination has a unique packet header. The following have been captured:
-
-| AHU | Zone |
-|-----|------|
-| 3 | 1 |
-| 5 | 1 |
-| 5 | 2 |
-| 5 | 3 |
-| 6 | 1 |
-| 7 | 1 |
-| 8 | 1 |
-| 9 | 1 |
-
----
-
-## On/Off Control (Captured)
-
-On/off control is achieved by **writing or clearing the weekly schedule data** on the controller. This was not reverse-engineered — the on and off packets for each area were manually captured from Supervisor.
-
-### How It Works
-
-- **Turn ON:** Sends a schedule write packet that populates the weekly schedule with time slot entries (effectively enabling the AC to run on its normal schedule)
-- **Turn OFF:** Sends a schedule write packet with all time slots zeroed out (effectively blanking the schedule so the AC never runs)
-
-### Packet Structure
-
-Schedule packets follow this general structure:
-
-```
-[schedule header] [schedule name (ASCII)] [time config] [time slot data] 78 56 0d 00
-```
-
-- The schedule name is the area's weekly schedule name (e.g., `West Rear Weekly`, `Kitchen Weekly`, `East Audit Weekly`)
-- Time slot data contains start/end time pairs — populated for ON, zeroed for OFF
-- Each command packet is sent **twice** (the payload is duplicated within the same TCP send)
-- Packets are terminated with the `78 56 0d 00` trailer
-
----
-
-## Files
-
-### Node-RED Flows
-
-#### AC Control.json
-
-Controls AC units via Home Assistant MQTT integration. Contains:
-
-- **Keepalive:** Sends the hello packet every 30 seconds to maintain the TCP session
-- **On/Off switches:** Pre-captured schedule write commands for each area, exposed as MQTT switches in Home Assistant
-- **Temperature setpoints:** The reverse-engineered temperature encoding function, exposed as MQTT number entities in Home Assistant (15–30°C range)
-- **`convert to hex value Multi-zone`:** The key function node that dynamically generates temperature setpoint packets for any supported AHU/zone. This is the reverse-engineered component
-- **Rate limiting:** Commands are sent through a delay/rate limiter to avoid overwhelming the controller
-
----
-
-## Home Assistant Integration
-
-The Node-RED flow integrates with Home Assistant via MQTT using `ha-mqtt` nodes. AC areas appear as:
-
-- **Switch entities** — for on/off control per area
-- **Number entities** — for temperature setpoint per AHU/zone (15–30°C)
-
-The MQTT device is configured as:
-
-| Property | Value |
-|----------|-------|
-| Manufacturer | Innotech |
-| Model | iComm |
-| HW Version | Genesis II |
-| SW Version | 2.38 |
-
----
-
-## Limitations and Unknowns
-
-- Only temperature setpoint encoding has been reverse-engineered; on/off commands are static captured packets
-- The full packet header structure (bytes between `7856 3f00 0600` and the temperature value) is not fully decoded — it contains Supervisor internal path references but the addressing scheme is not understood
-- No read-back / status polling has been implemented — commands are fire-and-forget (I do have a web scraper for the iComm Control that obtains the sensor information, not uploaded  yet)
-- Schedule time slot encoding has not been reverse-engineered (on/off uses pre-captured payloads)
-- Only the AHU/zone combinations listed above have been captured
-
----
-
-## Dependencies
-
-### Node-RED Modules
-
-- `node-red-contrib-string-to-hex` — Converts hex string payloads to binary buffer for TCP transmission
-- `node-red-contrib-ha-mqtt` — Home Assistant MQTT device integration
-
----
-
-## Screenshots
 <img width="547" height="356" alt="image" src="https://github.com/user-attachments/assets/997872ff-0cf2-488a-8a7d-82bd1c7f2be2" />
 
 AC controls within Home Assistant
@@ -191,9 +67,6 @@ AC controls within Home Assistant
 
 Node-RED integrating with iComm Control Centre
 
----
-
 ## Disclaimer
 
-This is an unofficial, reverse-engineered protocol implementation. Use at your own risk. The author is not affiliated with Innotech.
-
+This is unofficial and reverse engineered. Use at your own risk, especially the force on button, which overrides the controller's own schedule, after hours and fire alarm logic. I'm not affiliated with Innotech.

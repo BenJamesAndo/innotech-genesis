@@ -1,0 +1,148 @@
+# Innotech Genesis II bridge for a LilyGO T-RSS3 (ESP32-S3, isolated RS485 + RS232).
+#
+# This is the generic firmware that's attached to each GitHub release. It has no site-specific entities:
+# it shows which controllers answer, lets you scan each controller's blocks (results go to the ESPHome log)
+# and runs the TCP bridge so iComm/Supervisor can still reach the bus through it.
+# Once you know your block numbers, build your own config from example-full.yaml.
+#
+# Wi-Fi: on first boot (or when it can't connect) it starts a hotspot called "innotech-genesis-xxxxxx".
+# Join it and pick your network in the page that opens.
+#
+# Wiring: RS485 A/B/GND to the controllers' NET +/-/SCN terminals. Don't leave another bus master
+# (e.g. an iComm server's CONV232) on the same bus unless you set `polling: false`.
+# Protocol notes: docs/PROTOCOL.md
+
+substitutions:
+  name: innotech-genesis
+  friendly_name: Innotech Genesis
+
+esphome:
+  name: ${name}
+  friendly_name: ${friendly_name}
+  name_add_mac_suffix: true
+  comment: Innotech Genesis II BMS bridge (LilyGO T-RSS3)
+  project:
+    name: benjamesando.innotech-genesis
+    version: "1.0.0"
+
+esp32:
+  board: esp32-s3-devkitc-1
+  variant: esp32s3
+  framework:
+    type: esp-idf
+
+external_components:
+  - source:
+      type: local
+      path: components
+    components: [innotech_genesis]
+
+# Logs go to UART0 (GPIO43/44, unused) and over Wi-Fi. Logging on the USB port made the USB-serial-JTAG driver
+# hit an interrupt-watchdog storm (and boot-loop) while the board sat on a PC's USB. USB still works for flashing.
+logger:
+  level: DEBUG
+  hardware_uart: UART0
+
+api:
+
+web_server:
+
+ota:
+  platform: esphome
+
+wifi:
+  ap: {}
+
+captive_portal:
+
+uart:
+  - id: uart_rs485
+    tx_pin: GPIO3
+    rx_pin: GPIO2
+    baud_rate: 9600
+    rx_buffer_size: 1024
+
+innotech_genesis:
+  - id: genesis
+    uart_id: uart_rs485
+    flow_control_pin: GPIO4  # RS485 driver enable
+    tcp_port: 10001          # iComm "TCP/IP" connection pointed here gets a straight-through serial stream
+    transport: serial
+    devices: [1, 2, 3, 4, 5, 6, 7, 8]
+
+# Status LED (WS2812 on GPIO1): green = all controllers answering, yellow = some, red = none,
+# purple = something is using the TCP bridge, brief white blink = bus traffic.
+light:
+  - platform: esp32_rmt_led_strip
+    id: status_led
+    name: Status LED
+    pin: GPIO1
+    num_leds: 1
+    channel_colors: GRB
+    chipset: WS2812
+    default_transition_length: 0s
+    entity_category: config
+
+interval:
+  - interval: 150ms
+    then:
+      - lambda: |-
+          static uint32_t last = 0xFFFFFFFF;
+          if (!id(status_led).remote_values.is_on() && last != 0xFFFFFFFF) return;  // user turned it off
+          uint32_t c;
+          if (millis() - id(genesis).last_activity() < 120) c = 0xFFFFFF;
+          else if (id(genesis).tcp_client_connected()) c = 0x8000FF;
+          else if (id(genesis).all_alive()) c = 0x00FF00;
+          else if (id(genesis).any_alive()) c = 0xFFA000;
+          else c = 0xFF0000;
+          if (c == last) return;
+          last = c;
+          auto call = id(status_led).turn_on();
+          call.set_rgb(((c >> 16) & 0xFF) / 255.0f, ((c >> 8) & 0xFF) / 255.0f, (c & 0xFF) / 255.0f);
+          call.set_brightness(0.25);
+          call.set_transition_length(0);
+          call.perform();
+
+binary_sensor:
+  - { platform: innotech_genesis, type: online, address: 1, name: "Controller 1 online", device_class: connectivity }
+  - { platform: innotech_genesis, type: online, address: 2, name: "Controller 2 online", device_class: connectivity }
+  - { platform: innotech_genesis, type: online, address: 3, name: "Controller 3 online", device_class: connectivity }
+  - { platform: innotech_genesis, type: online, address: 4, name: "Controller 4 online", device_class: connectivity }
+  - { platform: innotech_genesis, type: online, address: 5, name: "Controller 5 online", device_class: connectivity }
+  - { platform: innotech_genesis, type: online, address: 6, name: "Controller 6 online", device_class: connectivity }
+  - { platform: innotech_genesis, type: online, address: 7, name: "Controller 7 online", device_class: connectivity }
+  - { platform: innotech_genesis, type: online, address: 8, name: "Controller 8 online", device_class: connectivity }
+
+sensor:
+  - platform: template
+    name: Bus frames received
+    lambda: return id(genesis).frames_ok();
+    update_interval: 60s
+    accuracy_decimals: 0
+    state_class: total_increasing
+    entity_category: diagnostic
+  - platform: template
+    name: Bus timeouts
+    lambda: return id(genesis).timeouts();
+    update_interval: 60s
+    accuracy_decimals: 0
+    state_class: total_increasing
+    entity_category: diagnostic
+  - platform: wifi_signal
+    name: WiFi signal
+    update_interval: 60s
+  - platform: uptime
+    name: Uptime
+
+# Block scan: logs every block of that controller (number, type, name, User Variable values).
+button:
+  - { platform: innotech_genesis, address: 1, name: "Scan controller 1 blocks", entity_category: diagnostic }
+  - { platform: innotech_genesis, address: 2, name: "Scan controller 2 blocks", entity_category: diagnostic }
+  - { platform: innotech_genesis, address: 3, name: "Scan controller 3 blocks", entity_category: diagnostic }
+  - { platform: innotech_genesis, address: 4, name: "Scan controller 4 blocks", entity_category: diagnostic }
+  - { platform: innotech_genesis, address: 5, name: "Scan controller 5 blocks", entity_category: diagnostic }
+  - { platform: innotech_genesis, address: 6, name: "Scan controller 6 blocks", entity_category: diagnostic }
+  - { platform: innotech_genesis, address: 7, name: "Scan controller 7 blocks", entity_category: diagnostic }
+  - { platform: innotech_genesis, address: 8, name: "Scan controller 8 blocks", entity_category: diagnostic }
+  - platform: restart
+    name: Restart
