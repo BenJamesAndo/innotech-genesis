@@ -52,12 +52,15 @@ A few things I found along the way:
 - Over iComm, field writes rewrite the whole block from iComm's cached copy, which can quietly change other settings. The ESP reads and patches the actual block instead.
 - Don't send save-to-flash through iComm. The controller goes quiet while it saves and iComm marks it Dead for about 3 minutes.
 - A digital output's `Forced` / `ForceValue` fields are the manual override. Supervisor has a dialog for it, but only if the output is on one of your watch pages.
+- Analogue outputs (valves, dampers) can be forced the same way. The force value is in the output's own units, so on a 0 to 1 output you send 0.4 for 40%, not 40. I found that out the hard way.
+- Each controller keeps a copy of the Gen2Config file it was programmed with, and Supervisor caches it on the PC. It has the whole program in it: every block, where it sits on the drawing and how it's wired. The block links aren't stored as a table, they come from the wiring lines and labels. Heads up that it also has the panel access codes in it, so don't post yours online.
+- SoftPort (in Innotech's free Utilities download) turned out to have Gen2Config's config and download code inside it, which is where most of the new command list came from.
 
-All the details are in [`docs/PROTOCOL.md`](docs/PROTOCOL.md).
+All the details are in [`docs/PROTOCOL.md`](docs/PROTOCOL.md), with the block types in [`docs/BLOCKS.md`](docs/BLOCKS.md), everything SoftPort sends in [`docs/SOFTPORT.md`](docs/SOFTPORT.md) and the config file format in [`docs/CONFIG_FILE.md`](docs/CONFIG_FILE.md).
 
 ## Tools
 
-[`tools/`](tools) has the Python scripts I used for the reverse engineering: the frame codec, decoders for serial port monitor exports and pcaps, a small iComm client, a raw request tool, a TCP relay for testing, and decoders for Gen2Xtract's log downloads. Set `ICOMM_HOST` (and `ICOMM_PASSWORD` for the web one) to point them at your iComm server.
+[`tools/`](tools) has the Python scripts I used for the reverse engineering: the frame codec, decoders for serial port monitor exports and pcaps, a small iComm client, a raw request tool, a TCP relay for testing, decoders for Gen2Xtract's log downloads, a decoder for the config files (`g4c_decode.py`), a viewer that draws them like Gen2Config does (`g4c_view.py`, handy since Gen2Config isn't available anymore) and a tool to force or release an analogue output (`ao_force.py`). Set `ICOMM_HOST` (and `ICOMM_PASSWORD` for the web one) to point them at your iComm server.
 
 ## Node-RED (the original approach)
 

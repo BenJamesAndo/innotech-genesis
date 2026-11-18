@@ -268,13 +268,28 @@ void GenesisBus::setup() {
 
 static constexpr const char *TRANSPORTS[] = {"serial", "icomm", "auto"};
 
-void GenesisBus::set_icomm_server(const std::string &host) {
+void GenesisBus::set_icomm_server(const std::string &value) {
+  // "192.168.1.10" or "192.168.1.10:20001"; the port defaults to icomm_port (20000)
+  std::string host = value;
+  uint16_t port = 0;
+  size_t colon = value.find(':');
+  if (colon != std::string::npos) {
+    host = value.substr(0, colon);
+    char *end = nullptr;
+    unsigned long p = strtoul(value.c_str() + colon + 1, &end, 10);
+    if (end == value.c_str() + colon + 1 || *end != '\0' || p == 0 || p > 65535) {
+      ESP_LOGW(TAG, "iComm server '%s' has a bad port, ignored", value.c_str());
+      return;
+    }
+    port = p;
+  }
   struct in_addr a {};
   if (!host.empty() && (host.size() >= sizeof(this->icomm_server_) || inet_aton(host.c_str(), &a) == 0)) {
-    ESP_LOGW(TAG, "iComm server '%s' is not an IPv4 address, ignored", host.c_str());
+    ESP_LOGW(TAG, "iComm server '%s' is not an IPv4 address, ignored", value.c_str());
     return;
   }
   snprintf(this->icomm_server_, sizeof(this->icomm_server_), "%s", host.c_str());
+  this->icomm_server_port_ = host.empty() ? 0 : port;
   // An IP replaces the configured hosts; empty goes back to the ones from the YAML (`icomm_hosts`).
   this->icomm_hosts_ = this->icomm_config_hosts_;
   if (!host.empty()) {
@@ -285,7 +300,10 @@ void GenesisBus::set_icomm_server(const std::string &host) {
   this->icomm_last_try_ = 0;
   if (this->icomm_fd_ >= 0)
     this->icomm_close_();  // reconnect to the new server
-  ESP_LOGI(TAG, "iComm server: %s", host.empty() ? "from config" : this->icomm_server_);
+  if (host.empty())
+    ESP_LOGI(TAG, "iComm server: from config");
+  else
+    ESP_LOGI(TAG, "iComm server: %s:%u", this->icomm_server_, this->icomm_port_for_(this->icomm_server_));
 }
 
 void GenesisBus::set_transport_mode(uint8_t transport) {
@@ -318,7 +336,7 @@ void GenesisBus::dump_config() {
   if (this->tcp_port_ != 0)
     ESP_LOGCONFIG(TAG, "  TCP bridge port: %u (iComm 'TCP/IP' connection)", this->tcp_port_);
   for (const char *h : this->icomm_hosts_)
-    ESP_LOGCONFIG(TAG, "  iComm server: %s:%u connection %u", h, this->icomm_port_, this->icomm_conn_);
+    ESP_LOGCONFIG(TAG, "  iComm server: %s:%u connection %u", h, this->icomm_port_for_(h), this->icomm_conn_);
 }
 
 bool GenesisBus::any_alive() const {
@@ -1254,7 +1272,8 @@ void GenesisBus::icomm_loop_(uint32_t now) {
     const char *host = this->icomm_hosts_[this->icomm_host_idx_++ % this->icomm_hosts_.size()];
     struct sockaddr_in addr {};
     addr.sin_family = AF_INET;
-    addr.sin_port = htons(this->icomm_port_);
+    const uint16_t port = this->icomm_port_for_(host);
+    addr.sin_port = htons(port);
     if (inet_aton(host, &addr.sin_addr) == 0) {
       ESP_LOGE(TAG, "iComm host '%s' must be an IP address", host);
       return;
@@ -1268,7 +1287,7 @@ void GenesisBus::icomm_loop_(uint32_t now) {
     ::connect(this->icomm_fd_, (struct sockaddr *) &addr, sizeof(addr));
     this->icomm_connecting_ = true;
     this->icomm_connect_started_ = now;
-    ESP_LOGD(TAG, "Connecting to iComm %s:%u", host, this->icomm_port_);
+    ESP_LOGD(TAG, "Connecting to iComm %s:%u", host, port);
     return;
   }
 

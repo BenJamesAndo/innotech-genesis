@@ -1,0 +1,374 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Genesis Config Viewer</title>
+<style>
+:root {
+  --bg: #f4f3ef; --panel: #ffffff; --ink: #1d2126; --muted: #5d6670; --rule: #d9d6cc;
+  --paper: #fbfaf6; --grid: #ece9df; --wire: #46505a; --wire-hi: #d9480f; --block: #ffffff;
+  --block-ink: #1d2126; --sel: #d9480f; --dim: 0.18;
+  --io: #2f6db5; --ctl: #b7791f; --logic: #2f855a; --sched: #7b4fb0; --var: #0f8a8a; --other: #6b7280;
+  --accent: #d9480f; --chip: #eef0f3;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #15181c; --panel: #1c2026; --ink: #e6e8eb; --muted: #9aa3ad; --rule: #2c323a;
+    --paper: #181b20; --grid: #20252c; --wire: #8b96a3; --wire-hi: #ff8a4c; --block: #232830;
+    --block-ink: #e6e8eb; --sel: #ff8a4c; --accent: #ff8a4c; --chip: #262c34;
+    --io: #6aa5ee; --ctl: #e0a94a; --logic: #5fc08b; --sched: #b38ae6; --var: #45c4c4; --other: #9aa3ad;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #15181c; --panel: #1c2026; --ink: #e6e8eb; --muted: #9aa3ad; --rule: #2c323a;
+  --paper: #181b20; --grid: #20252c; --wire: #8b96a3; --wire-hi: #ff8a4c; --block: #232830;
+  --block-ink: #e6e8eb; --sel: #ff8a4c; --accent: #ff8a4c; --chip: #262c34;
+  --io: #6aa5ee; --ctl: #e0a94a; --logic: #5fc08b; --sched: #b38ae6; --var: #45c4c4; --other: #9aa3ad;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; }
+body { background: var(--bg); color: var(--ink); font: 14px/1.4 "Segoe UI", system-ui, -apple-system, sans-serif;
+  display: grid; grid-template-rows: auto 1fr; }
+header { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; padding: 8px 16px;
+  border-bottom: 1px solid var(--rule); background: var(--panel); }
+header h1 { font-size: 15px; margin: 0; font-weight: 600; letter-spacing: .02em; }
+header .meta { color: var(--muted); font-size: 12px; }
+header .spacer { flex: 1; }
+select, input[type=search], button { font: inherit; color: var(--ink); background: var(--bg);
+  border: 1px solid var(--rule); border-radius: 6px; padding: 4px 8px; }
+button { cursor: pointer; }
+button:hover { border-color: var(--accent); }
+main { display: grid; grid-template-columns: minmax(0, 1fr) 360px; min-height: 0; }
+#canvas { position: relative; overflow: hidden; background: var(--paper); cursor: grab; min-width: 0; }
+#canvas.panning { cursor: grabbing; }
+svg { width: 100%; height: 100%; display: block; user-select: none; }
+aside { border-left: 1px solid var(--rule); background: var(--panel); overflow: auto; min-width: 0; }
+.tabs { display: flex; border-bottom: 1px solid var(--rule); position: sticky; top: 0; background: var(--panel); z-index: 1; }
+.tabs button { flex: 1; border: 0; border-radius: 0; background: none; padding: 8px; color: var(--muted);
+  border-bottom: 2px solid transparent; }
+.tabs button.on { color: var(--ink); border-bottom-color: var(--accent); }
+.pane { padding: 12px 16px; }
+.pane h2 { font-size: 16px; margin: 0 0 2px; text-wrap: balance; }
+.pane h3 { font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin: 16px 0 6px; }
+.kv { display: grid; grid-template-columns: auto 1fr; gap: 2px 12px; font-variant-numeric: tabular-nums; }
+.kv dt { color: var(--muted); }
+.kv dd { margin: 0; font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; font-size: 13px; overflow-wrap: anywhere; }
+.chip { display: inline-block; padding: 1px 8px; border-radius: 999px; background: var(--chip); font-size: 12px; }
+a.blk { color: var(--accent); cursor: pointer; text-decoration: none; }
+a.blk:hover { text-decoration: underline; }
+.muted { color: var(--muted); }
+ul.plain { list-style: none; padding: 0; margin: 0; }
+ul.plain li { padding: 3px 0; border-bottom: 1px solid var(--grid); }
+.page-title { font-weight: 600; margin-top: 12px; white-space: pre-line; }
+.hint { position: absolute; left: 12px; bottom: 10px; color: var(--muted); font-size: 12px; background: var(--panel);
+  border: 1px solid var(--rule); border-radius: 6px; padding: 3px 8px; }
+#empty { display: grid; place-items: center; height: 100%; color: var(--muted); text-align: center; padding: 16px; }
+/* drawing */
+.wire { stroke: var(--wire); stroke-width: 1; fill: none; }
+.wire.hi { stroke: var(--wire-hi); stroke-width: 2.2; }
+.blk-r { fill: var(--block); stroke-width: 1.4; }
+.blk-g { cursor: pointer; }
+.blk-g.sel .blk-r { stroke: var(--sel) !important; stroke-width: 3; }
+.blk-name { font: 600 7px "Segoe UI", system-ui, sans-serif; fill: var(--block-ink); }
+.blk-type { font: 6px "Segoe UI", system-ui, sans-serif; fill: var(--muted); }
+.blk-seq { font: 6px ui-monospace, Consolas, monospace; fill: var(--muted); }
+.pin { stroke-width: 1; }
+.lbl-r { fill: var(--panel); stroke-width: 1; }
+.lbl-t { font: 6.5px "Segoe UI", system-ui, sans-serif; fill: var(--block-ink); }
+.txt { font-family: Arial, "Segoe UI", sans-serif; font-weight: 600; }
+.dimmed .blk-g:not(.near) { opacity: var(--dim); }
+.dimmed .wire:not(.hi) { opacity: var(--dim); }
+@media (max-width: 760px) {
+  main { grid-template-columns: 1fr; grid-template-rows: 60vh auto; }
+  aside { border-left: 0; border-top: 1px solid var(--rule); }
+}
+</style>
+</head>
+<body>
+<header>
+  <h1>Genesis config viewer</h1>
+  <select id="cfgSel" aria-label="Controller"></select>
+  <span class="meta" id="meta"></span>
+  <span class="spacer"></span>
+  <input type="search" id="find" placeholder="Find block (name or #seq)" aria-label="Find block">
+  <button id="fit" title="Fit drawing">Fit</button>
+  <button id="theme" title="Light / dark">◐</button>
+</header>
+<main>
+  <div id="canvas"><div id="empty">Load a config: run <code>g4c_view.py file.g4c</code>, or drop a JSON file from
+    <code>g4c_decode.py --json</code> here.</div></div>
+  <aside>
+    <div class="tabs"><button data-tab="block" class="on">Block</button><button data-tab="pages">Watch pages</button><button data-tab="info">Controller</button></div>
+    <div class="pane" id="pane"></div>
+  </aside>
+</main>
+<script>
+const CONFIGS = /*CONFIGS*/[];
+
+const CAT = t => [0, 1, 2, 3, 40].includes(t) ? 'io'
+  : [4, 5, 6, 8, 9, 10, 11, 14, 15, 30, 34].includes(t) ? 'ctl'
+  : [18, 19, 20, 21, 24, 37, 38, 39, 31, 12, 13].includes(t) ? 'logic'
+  : [22, 23, 35, 17, 16, 36].includes(t) ? 'sched'
+  : [29, 28, 33].includes(t) ? 'var' : 'other';
+const SHORT = {0: 'AI', 1: 'DI', 2: 'AO', 3: 'DO', 4: 'PID', 11: 'SEL', 18: 'AND', 19: 'OR', 20: 'NOT', 21: 'XOR',
+  22: 'EXCEPT', 23: 'WEEKLY', 24: 'LATCH', 25: 'ALARM', 26: 'LOG', 28: 'GLOB IN', 29: 'USER VAR', 33: 'GLOB OUT', 35: 'DAILY'};
+const BW = 42, ROW = 7;
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;'}[c]));
+const $ = id => document.getElementById(id);
+
+let cfg = null, view = null, sel = null, tab = 'block', idx = {};
+
+function prep(c) {
+  const nodes = new Map(c.wires.nodes.map(n => [n.id, n]));
+  const blocks = new Map(c.blocks.map(b => [b.seq, b]));
+  // nets: union-find over wire lines plus same-named label pins
+  const parent = new Map();
+  const find = a => { while (parent.get(a) !== a) { parent.set(a, parent.get(parent.get(a))); a = parent.get(a); } return a; };
+  const uni = (a, b) => { a = find(a); b = find(b); if (a !== b) parent.set(a, b); };
+  for (const n of nodes.keys()) parent.set(n, n);
+  for (const [a, b] of c.wires.lines) if (nodes.has(a) && nodes.has(b)) uni(a, b);
+  const byLabel = {};
+  for (const n of nodes.values()) if (n.kind === 'label') (byLabel[n.label] ??= []).push(n.id);
+  for (const ids of Object.values(byLabel)) for (let i = 1; i < ids.length; i++) uni(ids[0], ids[i]);
+  const net = new Map([...nodes.keys()].map(n => [n, find(n)]));
+  const blockNodes = new Map();
+  for (const n of nodes.values()) if (n.block != null && (n.kind === 'input' || n.kind === 'output'))
+    (blockNodes.get(n.block) ?? blockNodes.set(n.block, []).get(n.block)).push(n);
+  const labels = new Map(c.wires.labels.map(l => [l.id, l]));
+  // neighbour of each label pin, to decide which side the tag goes on
+  const nb = new Map();
+  for (const [a, b] of c.wires.lines) { nb.set(a, b); nb.set(b, a); }
+  return {c, nodes, blocks, net, blockNodes, labels, nb};
+}
+
+function blockWidth(b) {
+  // outputs sit on the right edge, so their x gives the width (some types are wider than 42)
+  const outs = (idx.blockNodes.get(b.seq) ?? []).filter(n => n.kind === 'output');
+  return outs.length ? Math.max(...outs.map(n => n.x)) - b.x : BW;
+}
+function blockHeight(b) {
+  const rows = b.terminals.map(t => t.pin_row);
+  return Math.max(6, (rows.length ? Math.max(...rows) : 0) + 1) * ROW;
+}
+
+function render() {
+  const {c, nodes, blocks, blockNodes, labels, nb} = idx;
+  const parts = [];
+  const xs = [], ys = [];
+  for (const n of nodes.values()) { xs.push(n.x); ys.push(n.y); }
+  for (const b of c.blocks) { xs.push(b.x, b.x + blockWidth(b)); ys.push(b.y - 12, b.y + blockHeight(b)); }
+  for (const t of c.texts) { xs.push(t.x); ys.push(t.y); }
+  const minX = Math.min(...xs) - 40, minY = Math.min(...ys) - 40, maxX = Math.max(...xs) + 120, maxY = Math.max(...ys) + 40;
+  idx.bounds = {x: minX, y: minY, w: maxX - minX, h: maxY - minY};
+  parts.push(`<defs><pattern id="grid" width="70" height="70" patternUnits="userSpaceOnUse"><path d="M70 0H0V70" fill="none" stroke="var(--grid)" stroke-width="1"/></pattern></defs>`);
+  parts.push(`<rect x="${minX}" y="${minY}" width="${maxX - minX}" height="${maxY - minY}" fill="url(#grid)"/>`);
+  parts.push('<g id="texts">');
+  for (const t of c.texts) {
+    const fs = Math.max(8, t.size * 0.42);
+    parts.push(`<text class="txt" x="${t.x}" y="${t.y + fs}" font-size="${fs.toFixed(1)}" fill="${t.colour}" style="fill:${t.colour}">${esc(t.text)}</text>`);
+  }
+  parts.push('</g><g id="wires">');
+  c.wires.lines.forEach(([a, b], i) => {
+    const A = nodes.get(a), B = nodes.get(b);
+    if (A && B) parts.push(`<line class="wire" data-net="${idx.net.get(a)}" x1="${A.x}" y1="${A.y}" x2="${B.x}" y2="${B.y}"/>`);
+  });
+  parts.push('</g><g id="labels">');
+  for (const n of nodes.values()) {
+    if (n.kind !== 'label') continue;
+    const L = labels.get(n.label); if (!L) continue;
+    const name = L.name.trim(), w = Math.max(30, name.length * 3.6 + 8), h = 10;
+    const other = nodes.get(nb.get(n.id));
+    const left = other ? other.x > n.x : false;     // wire comes from the right: tag sits on the left
+    const x = left ? n.x - w : n.x;
+    parts.push(`<g class="lbl" data-net="${idx.net.get(n.id)}"><rect class="lbl-r" x="${x}" y="${n.y - h / 2}" width="${w}" height="${h}" rx="5" style="stroke:${L.colour}"/>`
+      + `<text class="lbl-t" x="${x + 4}" y="${n.y + 2.3}">${esc(name)}</text></g>`);
+  }
+  parts.push('</g><g id="blocks">');
+  for (const b of c.blocks) {
+    const h = blockHeight(b), W = blockWidth(b), col = `var(--${CAT(b.type)})`;
+    let pins = '';
+    for (const n of blockNodes.get(b.seq) ?? []) {
+      const out = n.kind === 'output';
+      const ti = n.terminal, nm = out ? b.output_names[ti - b.n_in] : b.input_names[ti];
+      pins += `<line class="pin" x1="${n.x}" y1="${n.y}" x2="${out ? n.x - 4 : n.x + 4}" y2="${n.y}" style="stroke:${col}"><title>${esc(nm)}</title></line>`;
+    }
+    parts.push(`<g class="blk-g" data-seq="${b.seq}"><title>${b.seq} ${esc(b.name)} (${esc(b.type_name)})</title>`
+      + `<text class="blk-name" x="${b.x}" y="${b.y - 3}">${esc(b.name.trim() || b.type_name)}</text>`
+      + `<rect class="blk-r" x="${b.x}" y="${b.y}" width="${W}" height="${h}" rx="3" style="stroke:${col}"/>`
+      + `<rect x="${b.x}" y="${b.y}" width="${W}" height="3" rx="1.5" style="fill:${col}"/>`
+      + `<text class="blk-type" x="${b.x + W / 2}" y="${b.y + h / 2 + 2}" text-anchor="middle">${esc(SHORT[b.type] ?? b.type_name)}</text>`
+      + `<text class="blk-seq" x="${b.x + W - 2}" y="${b.y + h - 2}" text-anchor="end">${b.seq}</text>${pins}</g>`);
+  }
+  parts.push('</g>');
+  $('canvas').innerHTML = `<svg id="svg" xmlns="http://www.w3.org/2000/svg"><g id="root">${parts.join('')}</g></svg>`
+    + '<div class="hint">Drag to pan, wheel to zoom, click a block</div>';
+  fit();
+}
+
+function setView(v) {
+  view = v;
+  $('svg')?.setAttribute('viewBox', `${v.x} ${v.y} ${v.w} ${v.h}`);
+}
+function fit() {
+  const el = $('canvas'), b = idx.bounds, r = el.clientWidth / Math.max(1, el.clientHeight);
+  let w = b.w, h = b.h;
+  if (w / h > r) h = w / r; else w = h * r;
+  setView({x: b.x - (w - b.w) / 2, y: b.y - (h - b.h) / 2, w, h});
+}
+function focusBlock(seq) {
+  const b = idx.blocks.get(seq); if (!b) return;
+  select(seq);
+  const el = $('canvas'), r = el.clientWidth / Math.max(1, el.clientHeight), w = 600, h = w / r;
+  setView({x: b.x + blockWidth(b) / 2 - w / 2, y: b.y - h / 2, w, h});
+}
+
+function select(seq) {
+  sel = seq;
+  const svg = $('svg'); if (!svg) return;
+  svg.querySelectorAll('.sel,.near,.hi').forEach(e => e.classList.remove('sel', 'near', 'hi'));
+  svg.classList.toggle('dimmed', seq != null);
+  if (seq != null) {
+    const nets = new Set((idx.blockNodes.get(seq) ?? []).map(n => idx.net.get(n.id)));
+    svg.querySelectorAll('.wire,.lbl').forEach(e => { if (nets.has(+e.dataset.net)) e.classList.add('hi'); });
+    const near = new Set([seq]);
+    for (const l of idx.c.links) { if (l.src === seq) near.add(l.dst); if (l.dst === seq) near.add(l.src); }
+    svg.querySelectorAll('.blk-g').forEach(g => { const s = +g.dataset.seq; if (near.has(s)) g.classList.add('near'); if (s === seq) g.classList.add('sel'); });
+  }
+  tab = 'block'; showTab();
+}
+
+const blk = s => { const b = idx.blocks.get(s); return b ? `<a class="blk" data-seq="${s}">${s} ${esc(b.name.trim() || b.type_name)}</a>` : `#${s}`; };
+function fmtVal(v) {
+  if (typeof v === 'number') return Number.isInteger(v) ? String(v) : (+v.toFixed(4)).toString();
+  if (Array.isArray(v)) return v.length ? v.map(p => p.on_text ? `${p.on_text} → ${p.off_text}` : JSON.stringify(p)).join('<br>') : '<span class="muted">none</span>';
+  if (typeof v === 'object' && v) return esc(JSON.stringify(v));
+  return esc(v);
+}
+
+function showTab() {
+  document.querySelectorAll('.tabs button').forEach(b => b.classList.toggle('on', b.dataset.tab === tab));
+  const p = $('pane'); if (!idx.c) { p.innerHTML = ''; return; }
+  const c = idx.c;
+  if (tab === 'block') {
+    if (sel == null) { p.innerHTML = '<p class="muted">Click a block on the drawing, or search for one by name.</p>'; return; }
+    const b = idx.blocks.get(sel);
+    const ins = b.input_names.map((nm, i) => {
+      const l = c.links.find(l => l.dst === b.seq && l.dst_in === i);
+      return `<dt>${esc(nm)}</dt><dd>${l ? `${blk(l.src)}.${esc(l.src_out_name)}${l.labels.length ? ` <span class="muted">via ${esc(l.labels.map(id => idx.labels.get(id)?.name.trim() ?? id).join(', '))}</span>` : ''}` : '<span class="muted">unconnected</span>'}</dd>`;
+    }).join('');
+    const outs = b.output_names.map((nm, k) => {
+      const to = c.links.filter(l => l.src === b.seq && l.src_out === k);
+      return `<dt>${esc(nm)}</dt><dd>${to.length ? to.map(l => `${blk(l.dst)}.${esc(l.dst_in_name)}`).join('<br>') : '<span class="muted">not used</span>'}</dd>`;
+    }).join('');
+    const params = Object.entries(b.params ?? {}).map(([k, v]) => `<dt>${esc(k)}</dt><dd>${fmtVal(v)}</dd>`).join('');
+    p.innerHTML = `<h2>${esc(b.name.trim() || '(no name)')}</h2>
+      <span class="chip" style="color:var(--${CAT(b.type)})">${esc(b.type_name)}</span> <span class="muted">block ${b.seq} · record type 0x${b.record_type.toString(16).padStart(2, '0')}</span>
+      <h3>Inputs</h3><dl class="kv">${ins || '<dd class="muted">none</dd>'}</dl>
+      <h3>Outputs</h3><dl class="kv">${outs || '<dd class="muted">none</dd>'}</dl>
+      <h3>Parameters (as downloaded)</h3><dl class="kv">${params || '<dd class="muted">none</dd>'}</dl>
+      <p class="muted" style="margin-top:16px;font-size:12px">Values are from the config file, i.e. as last downloaded. Settings changed later from Supervisor or the keypad aren't shown.</p>`;
+  } else if (tab === 'pages') {
+    const watchOf = id => idx.nodes.get(id);
+    p.innerHTML = c.watch_pages.map(pg => {
+      const lines = pg.lines.map(l => {
+        const n = watchOf(l.node), w = n?.watch;
+        return `<li>${l.line}. ${w ? `${esc(w.description)} <span class="muted">${esc(w.label)}${w.units ? ' ' + esc(w.units.replace('DgC', '°C')) : ''}</span>` : ''} ${n?.block ? '· ' + blk(n.block) : ''}${l.adjustable ? ' <span class="chip">adjustable</span>' : ''}</li>`;
+      }).join('');
+      return `<div class="page-title">Page ${pg.page}${pg.title ? ': ' + esc(pg.title.replace(/\r?\n/g, ' / ')) : ''}</div><ul class="plain">${lines || '<li class="muted">empty</li>'}</ul>`;
+    }).join('');
+  } else {
+    const h = c.header, ts = t => t ? new Date(t * 1000).toLocaleString() : '–';
+    const counts = {};
+    for (const b of c.blocks) counts[b.type_name] = (counts[b.type_name] ?? 0) + 1;
+    p.innerHTML = `<h2>${esc(h.device_name)}</h2><span class="muted">address ${h.address}</span>
+      <dl class="kv" style="margin-top:12px"><dt>Site</dt><dd>${esc(h.site)}</dd><dt>Author</dt><dd>${esc(h.author)}</dd>
+      <dt>Description</dt><dd>${esc(h.description)}</dd><dt>Last download</dt><dd>${ts(h.config_key)}</dd>
+      <dt>ConfigKey</dt><dd>0x${(h.config_key >>> 0).toString(16)}</dd><dt>Created</dt><dd>${ts(h.created)}</dd>
+      <dt>Blocks</dt><dd>${c.blocks.length}</dd><dt>Links</dt><dd>${c.links.length}</dd></dl>
+      <h3>Block types</h3><dl class="kv">${Object.entries(counts).sort((a, b) => b[1] - a[1]).map(([k, v]) => `<dt>${esc(k)}</dt><dd>${v}</dd>`).join('')}</dl>
+      <h3>Hardware modules</h3><ul class="plain">${(c.modules?.strings ?? []).map(s => `<li>${esc(s)}</li>`).join('')}</ul>`;
+  }
+}
+
+function load(i) {
+  const c = CONFIGS[i]; if (!c) return;
+  idx = prep(c); sel = null;
+  const h = c.header;
+  $('meta').textContent = `${h.description || ''} · ${c.blocks.length} blocks`;
+  render(); select(null); tab = 'info'; showTab();
+}
+function refreshSel() {
+  $('cfgSel').innerHTML = CONFIGS.map((c, i) => `<option value="${i}">${esc(c.header.device_name)} (${c.header.address})</option>`).join('');
+}
+
+// interaction
+let drag = null;
+$('canvas').addEventListener('pointerdown', e => {
+  if (!view) return;
+  const g = e.target.closest('.blk-g'); if (g) return;
+  drag = {x: e.clientX, y: e.clientY, v: {...view}, moved: false};
+  $('canvas').classList.add('panning'); $('canvas').setPointerCapture(e.pointerId);
+});
+$('canvas').addEventListener('pointermove', e => {
+  if (!drag) return;
+  const el = $('canvas'), s = drag.v.w / el.clientWidth;
+  const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+  if (Math.abs(dx) + Math.abs(dy) > 3) drag.moved = true;
+  setView({...drag.v, x: drag.v.x - dx * s, y: drag.v.y - dy * s});
+});
+$('canvas').addEventListener('pointerup', e => {
+  if (drag && !drag.moved && !e.target.closest('.blk-g')) select(null);
+  drag = null; $('canvas').classList.remove('panning');
+});
+$('canvas').addEventListener('click', e => { const g = e.target.closest('.blk-g'); if (g) select(+g.dataset.seq); });
+$('canvas').addEventListener('wheel', e => {
+  if (!view) return; e.preventDefault();
+  const el = $('canvas'), r = el.getBoundingClientRect();
+  const f = Math.exp(e.deltaY * 0.0015), px = (e.clientX - r.left) / r.width, py = (e.clientY - r.top) / r.height;
+  const w = Math.min(Math.max(view.w * f, 80), idx.bounds.w * 3), h = w * view.h / view.w;
+  setView({x: view.x + (view.w - w) * px, y: view.y + (view.h - h) * py, w, h});
+}, {passive: false});
+$('pane').addEventListener('click', e => { const a = e.target.closest('a.blk'); if (a) focusBlock(+a.dataset.seq); });
+document.querySelectorAll('.tabs button').forEach(b => b.addEventListener('click', () => { tab = b.dataset.tab; showTab(); }));
+$('fit').addEventListener('click', () => idx.bounds && fit());
+$('cfgSel').addEventListener('change', e => load(+e.target.value));
+$('find').addEventListener('keydown', e => {
+  if (e.key !== 'Enter' || !idx.c) return;
+  const q = e.target.value.trim().toLowerCase(); if (!q) return;
+  const n = q.replace(/^#/, '');
+  const hit = /^\d+$/.test(n) ? idx.blocks.get(+n) : idx.c.blocks.find(b => b.name.toLowerCase().includes(q));
+  if (hit) focusBlock(hit.seq);
+});
+$('theme').addEventListener('click', () => {
+  const r = document.documentElement, dark = r.dataset.theme ? r.dataset.theme === 'dark' : matchMedia('(prefers-color-scheme: dark)').matches;
+  r.dataset.theme = dark ? 'light' : 'dark';
+  try { localStorage.setItem('g4c-theme', r.dataset.theme); } catch (_) {}
+});
+try { const t = localStorage.getItem('g4c-theme'); if (t) document.documentElement.dataset.theme = t; } catch (_) {}
+document.addEventListener('dragover', e => e.preventDefault());
+document.addEventListener('drop', async e => {
+  e.preventDefault();
+  for (const f of e.dataTransfer.files) {
+    try { CONFIGS.push(JSON.parse(await f.text())); } catch (err) { alert?.('Not a g4c_decode.py JSON file'); }
+  }
+  refreshSel(); $('cfgSel').value = CONFIGS.length - 1; load(CONFIGS.length - 1);
+});
+// fit again whenever the canvas changes size, until the user pans or zooms
+let userView = false;
+['pointerdown', 'wheel'].forEach(ev => $('canvas').addEventListener(ev, () => { userView = true; }, {passive: true}));
+new ResizeObserver(() => { if (idx.bounds && !userView) fit(); }).observe($('canvas'));
+refreshSel();
+if (CONFIGS.length) {
+  // #3 = controller address 3, #3/36 = also open block 36
+  const m = location.hash.match(/^#(\d+)(?:\/(\d+))?$/);
+  const i = m ? Math.max(0, CONFIGS.findIndex(c => c.header.address === +m[1])) : 0;
+  $('cfgSel').value = i; load(i);
+  if (m && m[2]) { userView = true; focusBlock(+m[2]); }
+}
+</script>
+</body>
+</html>

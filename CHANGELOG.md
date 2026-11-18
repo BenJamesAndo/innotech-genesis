@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Docs: every block type with its parameter offsets (`docs/BLOCKS.md`), every Net command SoftPort sends including the full config download and read sequences (`docs/SOFTPORT.md`), and the Gen2Config / Supervisor config file format (`docs/CONFIG_FILE.md`).
+- `tools/g4c_decode.py`: decodes a config file into blocks, positions, links, parameters and watch pages (text or JSON). Never prints access codes.
+- `tools/ao_force.py`: force or release an analogue output through iComm.
+- `tools/g4c_view.py`: builds a self-contained HTML viewer from config files. It draws each controller's program the way it sits on the Gen2Config drawing (blocks, wires, labels, headings), and clicking a block shows what feeds it, what it drives and its parameters as downloaded. Pan, zoom, search, watch pages.
+- The "iComm server" setting takes `ip:port` as well as an IP, for an iComm server or relay on another port.
+
+### Changed
+
+- PROTOCOL.md: block record layout (diagram position and link format), analogue output force fields, weekly schedule time format confirmed, ConfigKey is the time of the last config download, iComm 4.4 notes.
+
 ## [1.2.0] - 2026-11-19
 
 ### Added

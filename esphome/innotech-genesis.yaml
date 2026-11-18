@@ -8,7 +8,7 @@
 # Wi-Fi: on first boot (or when it can't connect) it starts a hotspot called "innotech-genesis-xxxxxx".
 # Join it and pick your network in the page that opens.
 #
-# iComm: to use an existing iComm server instead of (or as a fallback to) the serial bus, enter its IP in the
+# iComm: to use an existing iComm server instead of (or as a fallback to) the serial bus, enter its IP (or ip:port) in the
 # "iComm server" setting and pick a "Connection mode" (auto = serial bus first, iComm when no controller answers).
 # Both are on the device page in Home Assistant and on the ESP's own web page, and survive reboots.
 #
@@ -83,7 +83,7 @@ text:
     name: iComm server
     icon: mdi:server-network
     mode: text
-    max_length: 15
+    max_length: 21  # ip or ip:port
     optimistic: true
     restore_value: true
     initial_value: ""

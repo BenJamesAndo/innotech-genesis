@@ -1,9 +1,17 @@
 # Innotech Genesis II protocol notes
 
 Working notes from building the ESPHome bridge in `esphome/`. Sources: reverse engineering of iComm 1.30
-(`icomm.exe`), serial captures of an iComm 2.38 server's COM port, and TCP captures of Supervisor 5.40 and
-Gen2Xtract talking to that server. The captures themselves aren't published (they're from a live site).
+(`icomm.exe`) and SoftPort 5.40D (`GEN2VPRT.exe`, which carries Gen2Config's config and transfer code), serial
+captures of an iComm 2.38 server's COM port, TCP captures of Supervisor 5.40 and Gen2Xtract talking to that
+server, and tests against iComm 4.4. The captures themselves aren't published (they're from a live site).
 Tool scripts mentioned below are in `tools/`.
+
+Other docs:
+- [BLOCKS.md](BLOCKS.md): every block type with its inputs, outputs and parameter offsets.
+- [SOFTPORT.md](SOFTPORT.md): every Net command SoftPort sends, including the full config download and read
+  sequences, the virtual keypad and device reset.
+- [CONFIG_FILE.md](CONFIG_FILE.md): the Gen2Config / Supervisor config file format (`.G2C` / `.g4c`), including
+  how block links are stored.
 
 Confidence tags: **[RE]** read from decompiled iComm code, **[CAP]** seen in a capture, **[GUESS]** unconfirmed.
 
@@ -67,32 +75,65 @@ All multi-byte values little-endian. `seq` = block sequence number (1..N).
 | 9/7 | read device table | – | 0x1F1 bytes: [0] enable, 62 × 8-byte entries ([8i+7] addr, [8i+8] kind) |
 | 9/8 | write device table | 0x3F bytes | – |
 | 9/9 | unknown, sent after device-table ops | – | discarded |
-| 5/3 | keepalive/poll | 4-byte counter | – |
-| 0/0x84, 0/0x8B, 0/0x8C, 0/0x91, 0/0x86, 0/0x83, 0/0x8E | newer-family equivalents of status, read/write record, find-by-name, MVO, bulk config read, rename | | |
+| 5/3 | comms test frame (SoftPort sends 0x80 bytes, u32 counter first) | | – |
+| 0/0x84, 0/0x8B, 0/0x8C, 0/0x91, 0/0x86, 0/0x83, 0/0x8E | newer-family equivalents of status, read/write record, find-by-name, MVO, read block outputs, read config data, write system info | | |
+
+Commands found in SoftPort (details and payloads in [SOFTPORT.md](SOFTPORT.md)):
+
+| Drv/Cmd | Name | Notes |
+|---|---|---|
+| 2/1, 2/2 | pause / resume block processing | 2/2 with a 10 s timeout is the "remote restart" after a download |
+| 2/3 | initialise blocks | sent near the end of a download |
+| 2/4 | write block table (remote modules) | 60 bytes |
+| 3/1 | clear log data | |
+| 5/1 | read the display | 80 characters of LCD text, cursor and LED bytes |
+| 5/2 | keypress | 1-byte key code; SoftPort's virtual keypad |
+| 6/1 … 6/5 | watches and watch pages (clear, read, write) | |
+| 7/1, 7/2 | read / write access codes | 16 × (4 ASCII digits + 1 byte) |
+| 9/2 | write system info | 0xAE-byte record |
+| 9/4, 9/5 | read / write controller password | |
+| 9/6 | **reset device** | empty payload; the controller restarts within about 15 s |
+| 0x0A/1, 2, 3 | logon, session info, logoff | logon payload 16 B (8 B password + 8 B user name) |
+| 0x0C/1, 2, 3 | clear / read / write the config file ("auxiliary data") | 256-byte chunks, compressed; see CONFIG_FILE.md |
 
 **Alive/Dead:** iComm sends DEVICEINFO then SYSTEM_READ. Alive = SYSTEM_READ answered with [0xAE] bit 0 set.
 Any failure = Dead (that's what the iComm web "Dead" status means).
 
 ### Block record and fields [RE]
+Record layout (2/5 reply, 2/6 payload after the seq byte), confirmed against the config file:
+
+| Bytes | Field |
+|---|---|
+| `[0x00..0x14]` | name (21 B, NUL padded) |
+| `[0x15]` | block type (see BLOCKS.md) |
+| `[0x16..0x19]` | diagram x, y (u16 each): the block's position on the Gen2Config drawing |
+| `[0x1A]` / `[0x1B]` | number of inputs / outputs |
+| `[0x1C..0x1D]` | parameter area size |
+| 6 B per input | **link**: u8 source block seq, u8 source output (1-based), f32 value. `00 00` = unconnected |
+| 4 B per output | current output values |
+| parameters | the block's settings, offsets in BLOCKS.md |
+
 - Outputs (section 1, e.g. `OUTPUT`, a sensor's `Value`) are live values read with cmd 7/9.
 - Parameters (section 2) live in the block record after the input links:
   `param_base = rec + 0x1E + 6*rec[0x1A] + 4*rec[0x1B]` (7 instead of 6 per link on Wide types), then + field offset.
 - Writing a parameter = read record (2/5), patch bytes, write record back (2/6), optionally save to flash (1/2).
-- Field table in icomm.exe 1.30 at 0x61C2E4 (24-byte entries). Useful entries (Genesis II block types):
+  A config download sends every block with this same 2/6 write, so links could be changed the same way.
+- Field table in icomm.exe 1.30 at 0x61C2E4 (24-byte entries). Useful entries (Genesis II block types, full list in BLOCKS.md):
 
 | Block type | Field | Offset / type |
 |---|---|---|
 | User Variable (setpoints) | Type / **Value** / MinVal / MaxVal / Pulse | 0 u8 / **1 f32** / 5 f32 / 9 f32 / 13 i32 |
 | PID Loop | SetPoint, DeadBand, DPropBand… (outputs: Direct = cooling demand, Reverse = heating demand) | 0, 4, 8… f32 |
 | Digital Output | DisableValue / FaultValue / Type / **Forced** / **ForceValue** | 0 / 1 / 3 / **4** / **5**, u8 |
+| Analogue Output | **Forced** / **ForceValue** / X1 / X2 / Y1 / Y2 | **0** u8 / **1** f32 / 5 / 9 / 17 / 21 f32. ForceValue is in output units (Y1..Y2), so 0.4 = 40 % on a 0–1 output. Tested: forcing and releasing a chilled water valve's AO took effect within a poll |
 | Weekly Schedule | On / Off | 0 / 2, u16, 32 entries, stride 4 |
 | Yearly Schedule | On / Off ×32, State bitmask @128 u32, Year @132 u8 | |
 | Analogue Input | CalM / CalC / LimitMin / LimitMax | 152 / 156 / 160 / 164 f32 |
 
 Block type code in a record at [0x15] = iComm's Genesis II type id + 1 (User Variable 0x1E, Digital Output 0x04).
 
-Weekly times: iComm web showed one Weekly Schedule's On = 1890, 3330, 4770, 6210, 7650 and Off = 2490…8250,
-which fits **minutes since start of week** (1890 = day 1 07:30, Off 2490 = day 1 17:30) [GUESS, needs a capture].
+Weekly times are **minutes since Sunday 00:00** (1890 = Monday 07:30), confirmed from config files.
+Except (holiday) schedules use 10-minute units and `day = (month-1)*32 + (day-1)` (see BLOCKS.md).
 
 Value encodings: 1 f32, 2 u8, 3/7 u16, 4/9 i32, 5 bitmask in a byte, 6 string, 8 bit in u32, 10 f32×0.01.
 
@@ -146,17 +187,19 @@ User Variable), PID `Direct` / `Reverse`, Digital Output `Forced` / `ForceValue`
 **Gotcha:** an iComm field write rewrites the whole block record from iComm's own cached copy, so other parameters can
 silently change (a PID's unused SetPoint went 22 → 23 when only DeadBand was written). The raw passthrough below avoids it.
 
-## 3. Controller config cache
+## 3. Controller config file
 
-Supervisor caches each controller's full program in `C:\Program Files\Innotech\cfgcache\<ConfigKey>.g4c`
-(file name = ConfigKey in decimal). It holds the site name, the access codes, F-key labels, watch-page
-descriptions and every block definition, so it can stand in for Gen2Config to map block numbers to names.
-Block records: len u16, seq u16, 0x15, name[21], canvas x u16, y u16, type u16 (iComm type id), …
+Each controller stores the Gen2Config source file it was programmed with (drv 0x0C "auxiliary data").
+Supervisor reads it when it connects and caches it in `C:\Program Files\Innotech\cfgcache\<n>.g4c` (the file
+name is Supervisor's own number, not the ConfigKey). It holds the site name, the access codes, F-key labels,
+watch pages and every block with its position and wiring. Format and decoder: [CONFIG_FILE.md](CONFIG_FILE.md),
+`tools/g4c_decode.py`.
+
+The **ConfigKey** (SYSTEM_READ `[0x31]`, iComm `System~ConfigKey`) is the unix time of the last config download.
 
 ## Open questions
 - drv 2/cmd 0x0B index meaning; drv 9/cmd 9; SYSTEM_READ fields beyond 0x31/0xAE/0xBA.
 - Whether the controller's local DB9 RS232 port uses the same framing as the Net (very likely: iComm can use it as a serial connection).
-- Weekly schedule time encoding (iComm web showed On times as u16 minutes-from-week-start, unconfirmed).
 
 ## 4. Raw Net passthrough + log extraction (Gen2Xtract capture) [CAP]
 
@@ -203,3 +246,14 @@ No logon needed for reads or record writes. Tool: `tools/icomm_raw.py DEV DRV CM
 **Do not send save-to-flash (drv 1 cmd 2) raw through iComm:** no reply ever comes, the controller goes quiet while
 saving, iComm marks it Dead and only re-probes about 3 minutes later. Timing via the server:
 block read 0.25-0.9 s (up to 4.6 s while busy), record write 0.5-2.7 s.
+
+## 5. iComm 4.4 and the TCP bridge [CAP]
+
+iComm 4.4 (installed with Focus 4.5) runs as a Windows service with a web UI on port 8080 (the "server hosting
+port" chosen at install). Supervisor still talks to it on TCP 20000 through its "iComm 1.xx connection over TCP"
+listener, so nothing else can use 20000 on that PC.
+
+Its **Innotech TCP** connection type is a TCP client to a raw serial stream (`IP Address`, `Port`, device address
+range). Pointed at the ESPHome bridge port (`tcp_port: 10001`), iComm 4.4 found both test controllers online as
+"Genesis II DDC 5.0" and read their block tables through the ESP, including when the ESP itself was reaching the
+bus through another iComm server (iComm mode). Timeouts and retries are per connection (defaults 5 s, 3 retries).

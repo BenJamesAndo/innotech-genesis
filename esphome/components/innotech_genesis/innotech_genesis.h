@@ -251,7 +251,7 @@ class GenesisBus : public Component, public uart::UARTDevice {
   void set_icomm_name(const char *name) { this->icomm_name_ = name; }
   void set_server_port(uint16_t port) { this->server_port_ = port; }
   // Runtime settings (e.g. from template text / select entities in the release firmware).
-  // set_icomm_server: an IP address replaces icomm_hosts; an empty string goes back to the YAML's icomm_hosts.
+  // set_icomm_server: "ip" or "ip:port" replaces icomm_hosts; an empty string goes back to the YAML's icomm_hosts.
   void set_icomm_server(const std::string &host);
   // set_transport_mode: 0 serial, 1 icomm, 2 auto (same order as the `transport` option).
   void set_transport_mode(uint8_t transport);
@@ -425,6 +425,10 @@ class GenesisBus : public Component, public uart::UARTDevice {
   uint8_t icomm_conn_{1};
   const char *icomm_name_{nullptr};  // nullptr = "ESPHome <friendly name> <MAC suffix>"
   char icomm_server_[16]{};          // runtime iComm server (set_icomm_server), dotted IPv4
+  uint16_t icomm_server_port_{0};    // its port if given as "ip:port", else 0 = icomm_port_
+  uint16_t icomm_port_for_(const char *host) const {
+    return (host == this->icomm_server_ && this->icomm_server_port_ != 0) ? this->icomm_server_port_ : this->icomm_port_;
+  }
   int icomm_fd_{-1};
   bool icomm_connecting_{false};
   bool icomm_ready_{false};
