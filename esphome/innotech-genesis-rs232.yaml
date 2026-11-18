@@ -1,0 +1,17 @@
+# Same firmware as innotech-genesis.yaml, but talking on the T-RSS3's RS232 port instead of RS485.
+#
+# Use this when the ESP plugs into one controller's front DB9 (RS232) port. You only see that one
+# controller, and while the port is in use that controller stops answering on the RS485 Net, so an
+# iComm server (or anything else) on the Net will show it as Dead.
+#
+# Wiring: the T-RSS3's RS232 TX/RX/GND to the panel's DB9 (crossed over: our TX to its RX).
+
+substitutions:
+  bus_tx_pin: GPIO41  # T-RSS3 RS232 TX
+  bus_rx_pin: GPIO42  # T-RSS3 RS232 RX
+
+packages:
+  base: !include innotech-genesis.yaml
+
+esphome:
+  comment: Innotech Genesis II BMS bridge (LilyGO T-RSS3, RS232 port)

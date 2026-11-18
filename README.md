@@ -24,7 +24,7 @@ I'm using a [LilyGO T-RSS3](https://github.com/Xinyuan-LilyGO/T-RSS3) (ESP32-S3 
 
 ## Getting started
 
-1. Download `innotech-genesis-t-rss3.factory.bin` from the [latest release](../../releases/latest) and flash it over USB with [ESPHome Web](https://web.esphome.io).
+1. Download `innotech-genesis-t-rss3.factory.bin` from the [latest release](../../releases/latest) and flash it over USB with [ESPHome Web](https://web.esphome.io). If you're plugging into a panel's front DB9 port, get `innotech-genesis-t-rss3-rs232.factory.bin` instead. It's the same firmware, just using the RS232 port.
 2. It starts a hotspot called `innotech-genesis-xxxxxx`. Join it and pick your Wi-Fi.
 3. Home Assistant should discover it. Add it and you'll see which controllers are online.
    If you've got an iComm server, put its IP in the "iComm server" setting and pick a "Connection mode". Auto uses the serial bus when a controller answers on it and falls back to iComm.

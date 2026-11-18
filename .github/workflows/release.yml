@@ -13,6 +13,13 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        include:
+          - yaml: innotech-genesis.yaml
+            asset: innotech-genesis-t-rss3            # RS485 port (the controllers' Net)
+          - yaml: innotech-genesis-rs232.yaml
+            asset: innotech-genesis-t-rss3-rs232      # RS232 port (one panel's front DB9)
     steps:
       - uses: actions/checkout@v7
 
@@ -20,20 +27,20 @@ jobs:
         id: esphome
         uses: esphome/build-action@v8.1.0
         with:
-          yaml-file: esphome/innotech-genesis.yaml
+          yaml-file: esphome/${{ matrix.yaml }}
           version: 2026.10.2
 
       - name: Collect binaries
         run: |
           mkdir dist
           src="${{ steps.esphome.outputs.name }}"
-          cp "$src/$src.factory.bin" dist/innotech-genesis-t-rss3.factory.bin
-          cp "$src/$src.ota.bin" dist/innotech-genesis-t-rss3.ota.bin
+          cp "$src/$src.factory.bin" "dist/${{ matrix.asset }}.factory.bin"
+          cp "$src/$src.ota.bin" "dist/${{ matrix.asset }}.ota.bin"
           ls -l dist
 
       - uses: actions/upload-artifact@v7
         with:
-          name: firmware
+          name: ${{ matrix.asset }}
           path: dist
 
       - name: Attach to release

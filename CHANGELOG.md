@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-11-19
+
 ### Added
 
 - Docs: every block type with its parameter offsets (`docs/BLOCKS.md`), every Net command SoftPort sends including the full config download and read sequences (`docs/SOFTPORT.md`), and the Gen2Config / Supervisor config file format (`docs/CONFIG_FILE.md`).
@@ -14,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `tools/ao_force.py`: force or release an analogue output through iComm.
 - `tools/g4c_view.py`: builds a self-contained HTML viewer from config files. It draws each controller's program the way it sits on the Gen2Config drawing (blocks, wires, labels, headings), and clicking a block shows what feeds it, what it drives and its parameters as downloaded. Pan, zoom, search, watch pages.
 - The "iComm server" setting takes `ip:port` as well as an IP, for an iComm server or relay on another port.
+- RS232 build of the release firmware (`innotech-genesis-t-rss3-rs232`), for plugging into one panel's front DB9 port. Same firmware, using the T-RSS3's RS232 port (GPIO41/42) instead of RS485. The serial pins are now substitutions (`bus_tx_pin`, `bus_rx_pin`).
 
 ### Changed
 
@@ -79,7 +82,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Python tools for the frame codec, capture decoding, an iComm client, raw requests, a TCP relay and Gen2Xtract log decoding.
 - GitHub Actions workflow that builds the firmware and attaches it to each release.
 
-[Unreleased]: https://github.com/BenJamesAndo/innotech-genesis/compare/v1.2.0...HEAD
+[Unreleased]: https://github.com/BenJamesAndo/innotech-genesis/compare/v1.3.0...HEAD
+[1.3.0]: https://github.com/BenJamesAndo/innotech-genesis/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/BenJamesAndo/innotech-genesis/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/BenJamesAndo/innotech-genesis/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/BenJamesAndo/innotech-genesis/releases/tag/v1.0.0

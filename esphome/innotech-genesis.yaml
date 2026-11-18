@@ -19,6 +19,9 @@
 substitutions:
   name: innotech-genesis
   friendly_name: Innotech Genesis
+  # serial port pins: RS485 here; innotech-genesis-rs232.yaml swaps in the RS232 port
+  bus_tx_pin: GPIO3
+  bus_rx_pin: GPIO2
 
 esphome:
   name: ${name}
@@ -27,7 +30,7 @@ esphome:
   comment: Innotech Genesis II BMS bridge (LilyGO T-RSS3)
   project:
     name: benjamesando.innotech-genesis
-    version: "1.2.0"
+    version: "1.3.0"
 
 esp32:
   board: esp32-s3-devkitc-1
@@ -62,9 +65,9 @@ captive_portal:
 uart:
   - id: uart_rs485
     tx_pin:
-      number: GPIO3
-      ignore_strapping_warning: true  # the T-RSS3 wires RS485 TX to GPIO3
-    rx_pin: GPIO2
+      number: ${bus_tx_pin}
+      ignore_strapping_warning: true  # the T-RSS3 wires RS485 TX to GPIO3, a strapping pin
+    rx_pin: ${bus_rx_pin}
     baud_rate: 9600
     rx_buffer_size: 1024
 
