@@ -1,8 +1,8 @@
 # Innotech Genesis II bridge for a LilyGO T-RSS3 (ESP32-S3, isolated RS485 + RS232).
 #
 # This is the generic firmware that's attached to each GitHub release. It has no site-specific entities:
-# it shows which controllers answer, lets you scan each controller's blocks (results go to the ESPHome log)
-# and runs the TCP bridge so iComm/Supervisor can still reach the bus through it.
+# it shows which controllers answer, lets you scan each controller's blocks (results go to the ESPHome log),
+# acts as an iComm server so Supervisor can connect to it directly, and runs a TCP bridge for an iComm server.
 # Once you know your block numbers, build your own config from example-full.yaml.
 #
 # Wi-Fi: on first boot (or when it can't connect) it starts a hotspot called "innotech-genesis-xxxxxx".
@@ -27,7 +27,7 @@ esphome:
   comment: Innotech Genesis II BMS bridge (LilyGO T-RSS3)
   project:
     name: benjamesando.innotech-genesis
-    version: "1.1.0"
+    version: "1.2.0"
 
 esp32:
   board: esp32-s3-devkitc-1
@@ -72,7 +72,8 @@ innotech_genesis:
   - id: genesis
     uart_id: uart_rs485
     flow_control_pin: GPIO4  # RS485 driver enable
-    tcp_port: 10001          # for an iComm server's "TCP/IP" connection (raw serial stream; Supervisor can't connect here)
+    tcp_port: 10001          # for an iComm server's "TCP/IP" connection (raw serial stream)
+    icomm_server_port: 20000 # Supervisor can connect to this ESP's IP as if it were an iComm server
     transport: auto          # changed at runtime by the "Connection mode" setting below
     devices: [1, 2, 3, 4, 5, 6, 7, 8]
 
@@ -103,10 +104,9 @@ select:
     on_value:
       - lambda: id(genesis).set_transport_mode(i);
 
-# Status LED (WS2812 on GPIO1)
-#   serial bus: green = all controllers answering, yellow = some, red = none
-#   via iComm: blue = connected with live data, orange = connected but no controller alive, red = not connected
-#   purple = something is using the TCP bridge, brief white blink = bus traffic
+# Status LED (WS2812 on GPIO1), one steady colour like a panel's RUN / FAULT lamps:
+#   green = every controller it has heard from is answering, amber = one that was answering has stopped,
+#   red = nothing answering (or not connected to the iComm server). Addresses that never answer don't count.
 light:
   - platform: esp32_rmt_led_strip
     id: status_led
@@ -125,12 +125,10 @@ interval:
           static uint32_t last = 0xFFFFFFFF;
           if (!id(status_led).remote_values.is_on() && last != 0xFFFFFFFF) return;  // user turned it off
           uint32_t c;
-          if (millis() - id(genesis).last_activity() < 120) c = 0xFFFFFF;
-          else if (id(genesis).tcp_client_connected()) c = 0x8000FF;
-          else if (id(genesis).using_icomm()) c = !id(genesis).icomm_connected() ? 0xFF0000 : (id(genesis).any_alive() ? 0x0040FF : 0xFF6000);
-          else if (id(genesis).all_alive()) c = 0x00FF00;
-          else if (id(genesis).any_alive()) c = 0xFFA000;
-          else c = 0xFF0000;
+          if (id(genesis).using_icomm() && !id(genesis).icomm_connected()) c = 0xFF0000;
+          else if (!id(genesis).any_alive()) c = 0xFF0000;
+          else if (id(genesis).any_lost()) c = 0xFFA000;
+          else c = 0x00FF00;
           if (c == last) return;
           last = c;
           auto call = id(status_led).turn_on();

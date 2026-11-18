@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-11-19
+
+### Added
+
+- iComm server (`icomm_server_port`, 20000 in the release firmware): Supervisor can connect straight to the ESP as if it were an iComm server. It answers the session, connection and device list handshake, passes raw bus commands through (logon, status, config file, block records), polls subscriptions on the bus and pushes updates, answers `System~ConfigKey` reads, and writes User Variables. Works on the serial bus, or relayed through another iComm server when the ESP is in iComm mode.
+- `server_client_connected()` so a config can show when Supervisor is connected.
+- The TCP bridge also works when the ESP is in iComm mode: bridged commands go through its iComm connection.
+
+### Changed
+
+- Status LED is one steady colour per status, like a panel's RUN / FAULT lamps: green = every controller it has heard from is answering, amber = one that was answering has stopped, red = nothing answering or not connected. Addresses that never answer don't count, so listing extra addresses (or an RS232 hookup to one controller) still shows green. No more traffic blinks or extra colours.
+- New `any_lost()` for that amber state.
+
+### Fixed
+
+- A raw request for a controller the iComm server has marked dead is answered with a type-1 0xF447 refusal, not a raw reply. The ESP now treats that as "dead" straight away (and remembers it), instead of waiting out a 10 second timeout.
+
 ## [1.1.0] - 2026-11-19
 
 ### Added
@@ -50,6 +67,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Python tools for the frame codec, capture decoding, an iComm client, raw requests, a TCP relay and Gen2Xtract log decoding.
 - GitHub Actions workflow that builds the firmware and attaches it to each release.
 
-[Unreleased]: https://github.com/BenJamesAndo/innotech-genesis/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/BenJamesAndo/innotech-genesis/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/BenJamesAndo/innotech-genesis/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/BenJamesAndo/innotech-genesis/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/BenJamesAndo/innotech-genesis/releases/tag/v1.0.0

@@ -26,6 +26,8 @@ CONF_ICOMM_HOSTS = "icomm_hosts"
 CONF_ICOMM_PORT = "icomm_port"
 CONF_ICOMM_CONNECTION = "icomm_connection"
 CONF_ICOMM_NAME = "icomm_name"
+CONF_ICOMM_SERVER_PORT = "icomm_server_port"
+MAX_SERVER_CLIENTS = 3  # matches innotech_genesis.h
 ICOMM_NAME_MAX = 32  # the hello's application field; iComm shows it in Current Applications
 
 TRANSPORTS = {"serial": 0, "icomm": 1, "auto": 2}
@@ -39,6 +41,10 @@ BLOCK = cv.int_range(min=1, max=255)
 def _consume_sockets(config):
     # One socket for the iComm client, always: the server can also be set at runtime (set_icomm_server).
     socket.consume_sockets(1, "innotech_genesis_icomm")(config)
+    # The iComm server for Supervisor: one listener and up to MAX_SERVER_CLIENTS clients.
+    if config[CONF_ICOMM_SERVER_PORT]:
+        socket.consume_sockets(MAX_SERVER_CLIENTS, "innotech_genesis_server")(config)
+        socket.consume_sockets(1, "innotech_genesis_server", socket.SocketType.TCP_LISTEN)(config)
     # The TCP bridge needs one listening socket and one client (plus one spare for a replacing client).
     if config[CONF_TCP_PORT]:
         socket.consume_sockets(2, "innotech_genesis")(config)
@@ -68,6 +74,8 @@ CONFIG_SCHEMA = cv.All(
             # Name shown in iComm's Current Applications. Default: "ESPHome <friendly name> <last 4 MAC hex>",
             # so several bridges never look alike.
             cv.Optional(CONF_ICOMM_NAME): cv.All(cv.string_strict, cv.Length(min=1, max=ICOMM_NAME_MAX)),
+            # Act as an iComm server so Supervisor can connect to the ESP directly (usually 20000; 0 = off).
+            cv.Optional(CONF_ICOMM_SERVER_PORT, default=0): cv.Any(cv.one_of(0), cv.port),
         }
     )
     .extend(cv.COMPONENT_SCHEMA)
@@ -95,6 +103,7 @@ async def to_code(config):
         cg.add(var.add_icomm_host(str(host)))
     cg.add(var.set_icomm_port(config[CONF_ICOMM_PORT]))
     cg.add(var.set_icomm_connection(config[CONF_ICOMM_CONNECTION]))
+    cg.add(var.set_server_port(config[CONF_ICOMM_SERVER_PORT]))
     if CONF_ICOMM_NAME in config:
         cg.add(var.set_icomm_name(config[CONF_ICOMM_NAME]))
     for addr in config[CONF_DEVICES]:

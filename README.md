@@ -12,7 +12,8 @@ Innotech don't support this gear or offer the software anymore, so hopefully thi
 - Cooling and heating demand per zone, chilled water valve %, fan status, after hours and fire alarm inputs
 - Scan a controller and log every block (number, type, name, values), which is how you find the block numbers for your site
 - Talk to the bus directly over RS485, or through an existing iComm server over TCP like Supervisor does, or switch between the two automatically
-- A TCP bridge on port 10001 so an iComm server can use the ESP as its connection to the bus (set up a TCP/IP connection in iComm pointing at the ESP). Supervisor still connects to iComm, not to the ESP directly
+- Supervisor can connect straight to the ESP as if it were an iComm server (port 20000), so you don't need the Windows PC to use Supervisor either
+- A TCP bridge on port 10001 so an existing iComm server can use the ESP as its connection to the bus (a TCP/IP connection in iComm pointing at the ESP)
 
 ## Hardware
 
@@ -35,6 +36,8 @@ external_components:
   - source: github://BenJamesAndo/innotech-genesis@main
     components: [innotech_genesis]
 ```
+
+To use Supervisor with it, go to Communicate, Comms settings, Advanced and put in the ESP's IP as the server. Supervisor only talks to one server at a time, so with more than one ESP you either switch between them or add each ESP to your iComm server as a TCP/IP connection on port 10001.
 
 If you've got more than one, give each a name for iComm's Current Applications list with `icomm_name: "ESPHome DDC1 plant room"`. Otherwise it uses the device name plus the end of the MAC address.
 

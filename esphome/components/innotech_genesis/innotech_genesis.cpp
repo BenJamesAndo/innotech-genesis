@@ -2,7 +2,10 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <strings.h>
 
 #include "esphome/core/application.h"
 #include "esphome/core/log.h"
@@ -74,6 +77,42 @@ static constexpr uint32_t IC_RAW_TIMEOUT_MS = 10000;  // raw requests via the se
 static constexpr uint32_t IC_RECONNECT_MS = 10000;
 static constexpr uint32_t IC_CONNECT_TIMEOUT_MS = 5000;
 static constexpr uint32_t IC_SILENCE_MS = 45000;  // iComm sends a keepalive every ~10 s
+
+// iComm server (Supervisor -> ESP). Message types beyond the client ones above:
+static constexpr uint16_t IC_CONN_INFO = 0x09;       // -> 0x12
+static constexpr uint16_t IC_CONN_INFO_REPLY = 0x12;
+static constexpr uint16_t IC_CONN_LIST = 0x0B;       // -> 0x0C
+static constexpr uint16_t IC_CONN_LIST_REPLY = 0x0C;
+static constexpr uint16_t IC_DEV_SUMMARY = 0x0F;     // "conn:dev" -> 0x13
+static constexpr uint16_t IC_DEV_SUMMARY_REPLY = 0x13;
+static constexpr uint16_t IC_KEEPALIVE = 0x10;
+static constexpr uint16_t IC_SESSION = 0x16;         // -> 0x17
+static constexpr uint16_t IC_SESSION_REPLY = 0x17;
+static constexpr uint16_t IC_DEV_LIST = 0x1A;        // "conn" -> 0x1B
+static constexpr uint16_t IC_DEV_LIST_REPLY = 0x1B;
+static constexpr uint16_t IC_STATUS_ERROR = 0xFC15;  // what iComm 2.38 answers for fields it can't read
+static constexpr uint16_t IC_STATUS_RAW_DEAD = 0xF447;  // type-1 answer to a raw request for a dead controller
+static constexpr uint32_t SERVER_KEEPALIVE_MS = 10000;
+static constexpr uint32_t SERVER_POLL_MS = 2000;      // subscription polling
+static constexpr uint32_t SERVER_SYS_MS = 30000;      // ConfigKey refresh
+static constexpr uint32_t SERVER_RAW_TIMEOUT_MS = 3000;
+static constexpr uint32_t SERVER_LISTEN_RETRY_MS = 5000;
+// Replies copied from iComm 2.38 (a Supervisor capture): the connection list (Facility Manager + "BMS Network"
+// as connection 1) and the connection's info ("BMS Network", "Serial\nCOM1@9600"). Zero-padded to full length.
+static constexpr uint8_t SERVER_CONN_LIST[] = {
+    0x02, 0x00, 0x03, 0x00, 0x01, 0x00, 0x01, 0x00, 'F', 'a', 'c', 'i', 'l', 'i', 't', 'y', ' ', 'M', 'a', 'n',
+    'a', 'g', 'e', 'r', ' ', 'o', 'n', ' ', 'l', 'o', 'c', 'a', 'l', ' ', 'P', 'C', 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x01, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x04, 0x00, 'B', 'M', 'S', ' ', 'N', 'e', 't', 'w', 'o', 'r',
+    'k', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x02};
+static constexpr size_t SERVER_CONN_LIST_LEN = 154;
+static constexpr uint8_t SERVER_CONN_INFO[] = {
+    0x01, 0x00, 0x02, 0x00, 0x00, 0x00, 0x04, 0x00, 0x0C, 0x00, 0x11, 0x00, 0x01, 0x00, 0x01, 0x00, 0x01, 0x00,
+    'B', 'M', 'S', ' ', 'N', 'e', 't', 'w', 'o', 'r', 'k', 0, 'S', 'e', 'r', 'i', 'a', 'l', '\n', 'C', 'O', 'M',
+    '1', '@', '9', '6', '0', '0'};
+static constexpr size_t SERVER_CONN_INFO_LEN = 50;
+static constexpr uint8_t SERVER_OK_TAIL[] = {0x01, 0x01, 0x00, 0x00};  // after echo + result in OK replies
 
 uint16_t crc16_arc(const uint8_t *data, size_t len, uint16_t crc) {
   for (size_t i = 0; i < len; i++) {
@@ -289,6 +328,13 @@ bool GenesisBus::any_alive() const {
   return false;
 }
 
+bool GenesisBus::any_lost() const {
+  for (const auto &d : this->devices_)
+    if (d.seen && !d.alive)
+      return true;
+  return false;
+}
+
 bool GenesisBus::all_alive() const {
   if (this->devices_.empty())
     return false;
@@ -363,7 +409,7 @@ void GenesisBus::transmit_(uint8_t dst, uint8_t drv, uint8_t cmd, const uint8_t 
   hdr[2] = drv;
   hdr[3] = 0xFF;
   hdr[4] = 0x00;
-  hdr[5] = 0x00;
+  hdr[5] = this->current_.flag;
   hdr[6] = cmd;
   hdr[7] = len & 0xFF;
   hdr[8] = len >> 8;
@@ -390,6 +436,19 @@ void GenesisBus::send_next_(uint32_t now) {
   // 1. Bridged traffic first so iComm/Supervisor stay snappy.
   if (this->bridge_pending_) {
     this->bridge_pending_ = false;
+    if (this->active_icomm_) {
+      // No serial bus: send the bridged command through our iComm connection and rebuild the reply frame.
+      this->current_.kind = REQ_BRIDGE_ICOMM;
+      this->current_.dst = this->bridge_dst_;
+      this->current_.drv = this->bridge_drv_;
+      this->current_.cmd = this->bridge_cmd_;
+      this->current_.flag = this->bridge_flag_;
+      this->current_.client = 0xFF;
+      this->current_.len = 0;
+      this->transmit_(this->bridge_dst_, this->bridge_drv_, this->bridge_cmd_, this->bridge_buf_ + 6 + 11,
+                      this->bridge_data_len_, now);
+      return;
+    }
     this->current_.kind = REQ_BRIDGE;
     this->current_.dst = this->bridge_dst_;
     this->current_.drv = 0;
@@ -397,6 +456,26 @@ void GenesisBus::send_next_(uint32_t now) {
     this->current_.len = 0;
     this->current_seq_ = this->bridge_seq_;
     this->send_raw_(this->bridge_buf_, this->bridge_len_, now);
+    return;
+  }
+
+  // 1b. Raw requests from iComm server clients (Supervisor), one per client at a time.
+  for (size_t i = 0; i < MAX_SERVER_CLIENTS; i++) {
+    ServerClient &c = this->server_clients_[i];
+    if (c.fd < 0 || !c.raw_pending || c.raw_inflight)
+      continue;
+    c.raw_pending = false;
+    c.raw_inflight = true;
+    this->current_.kind = REQ_SERVER_RAW;
+    this->current_.dst = c.raw_dst;
+    this->current_.drv = c.raw_drv;
+    this->current_.cmd = c.raw_cmd;
+    this->current_.flag = c.raw_flag;
+    this->current_.len = 0;
+    this->current_.client = i;
+    this->current_.client_gen = c.gen;
+    this->current_.invoke = c.raw_invoke;
+    this->transmit_(c.raw_dst, c.raw_drv, c.raw_cmd, c.raw_buf, c.raw_len, now);
     return;
   }
 
@@ -414,6 +493,8 @@ void GenesisBus::send_next_(uint32_t now) {
     // overwrite that and wedge every later write.
     const WriteStage stage = this->write_stage_;
     this->write_stage_ = WS_WAIT;
+    this->current_.flag = 0;
+    this->current_.client = 0xFF;
     if (stage == WS_READ) {
       this->current_.kind = REQ_WRITE_READ;
       this->current_.drv = DRV_BLOCK;
@@ -438,6 +519,8 @@ void GenesisBus::send_next_(uint32_t now) {
       this->scan_next_ <= this->scan_count_) {
     uint8_t seq = this->scan_next_;
     this->current_.kind = REQ_SCAN_BLOCK;
+    this->current_.flag = 0;
+    this->current_.client = 0xFF;
     this->current_.dst = this->scan_address_;
     this->current_.drv = DRV_BLOCK;
     this->current_.cmd = CMD_READ_BLOCK;
@@ -532,6 +615,43 @@ void GenesisBus::finish_(bool ok, uint8_t status, const uint8_t *d, size_t n) {
     case REQ_SCAN_BLOCK:
       this->handle_scan_(ok, status, d, n);
       break;
+    case REQ_SERVER_RAW:
+    case REQ_SERVER_MVO:
+    case REQ_SERVER_SYS:
+    case REQ_SERVER_COUNT:
+      this->server_finish_(ok, status, d, n);
+      break;
+    case REQ_BRIDGE_ICOMM:
+      // Rebuild the controller's reply frame for the bridge client (no answer = it times out, as on the bus).
+      if (ok && this->client_fd_ >= 0 && n <= MAX_FRAME_DATA) {
+        uint8_t *f = this->tx_buf_;
+        f[0] = 0xFF;
+        f[1] = 0xFF;
+        f[2] = 0x22;
+        f[3] = 0xDD;
+        uint8_t *hdr = f + 4;
+        hdr[0] = this->bridge_seq_;
+        hdr[1] = 0xFF;
+        hdr[2] = 0x00;
+        hdr[3] = this->current_.dst;
+        hdr[4] = this->current_.drv;
+        hdr[5] = 0x00;
+        hdr[6] = status;
+        hdr[7] = n & 0xFF;
+        hdr[8] = n >> 8;
+        uint16_t c = crc16_arc(hdr, 9);
+        f[13] = c & 0xFF;
+        f[14] = c >> 8;
+        if (n > 0)
+          memcpy(f + 15, d, n);
+        c = crc16_arc(d, n);
+        f[15 + n] = c & 0xFF;
+        f[16 + n] = c >> 8;
+        f[17 + n] = 0xFF;
+        f[18 + n] = 0xFF;
+        ::send(this->client_fd_, f, 19 + n, MSG_DONTWAIT);
+      }
+      break;
     default:
       break;
   }
@@ -550,6 +670,8 @@ void GenesisBus::loop() {
     uint32_t timeout = this->current_.drv == DRV_FLASH ? SAVE_FLASH_TIMEOUT_MS : this->reply_timeout_;
     if (this->via_icomm_())
       timeout = std::max(timeout, IC_RAW_TIMEOUT_MS);  // the server queues it behind its own polling
+    else if (this->current_.kind == REQ_SERVER_RAW)
+      timeout = std::max(timeout, SERVER_RAW_TIMEOUT_MS);  // config-file reads and logons can be slow
     if ((int32_t) (now - this->sent_at_) > (int32_t) timeout) {
       this->timeouts_++;
       ESP_LOGD(TAG, "Timeout dst=%u drv=%02X cmd=%02X", this->current_.dst, this->current_.drv, this->current_.cmd);
@@ -559,6 +681,8 @@ void GenesisBus::loop() {
 
   if (this->tcp_port_ != 0)
     this->tcp_loop_(now);
+  if (this->server_port_ != 0)
+    this->server_loop_(now);
 
   if (this->active_icomm_) {
     this->icomm_loop_(now);
@@ -632,6 +756,10 @@ void GenesisBus::handle_status_(bool ok, uint8_t status, const uint8_t *d, size_
     memcpy(dev->name, d, 20);
     dev->name[20] = '\0';
     dev->firmware = d[0xBB] + d[0xBA] / 100.0f;
+    memcpy(&dev->config_key, d + 0x31, 4);
+    dev->fw_lo = d[0xBA];
+    dev->fw_hi = d[0xBB];
+    dev->sys_valid = true;
   }
   if (first || running != was)
     ESP_LOGI(TAG, "Device %u '%s' %s (fw %.2f)", address, dev->name, running ? "ALIVE" : "dead", dev->firmware);
@@ -649,6 +777,8 @@ void GenesisBus::set_device_alive_(uint8_t address, bool alive) {
   if (dev == nullptr)
     return;
   dev->checked = true;
+  if (alive)
+    dev->seen = true;
   if (dev->alive == alive)
     return;
   dev->alive = alive;
@@ -939,6 +1069,7 @@ void GenesisBus::switch_transport_(bool icomm) {
   for (auto &d : this->devices_) {
     d.alive = false;
     d.checked = false;
+    d.seen = false;
     d.failures = 0;
 #ifdef USE_BINARY_SENSOR
     if (d.online_sensor != nullptr)
@@ -1099,7 +1230,7 @@ void GenesisBus::icomm_raw_(uint8_t dst, uint8_t drv, uint8_t cmd, const uint8_t
     head[8] = '0' + dst;
   }
   head[10] = 1;
-  head[25] = 0x03;
+  head[25] = this->current_.flag != 0 ? this->current_.flag : 0x03;
   head[26] = cmd;
   head[28] = drv;
   head[30] = len & 0xFF;
@@ -1278,6 +1409,21 @@ void GenesisBus::icomm_handle_(const uint8_t *m, size_t len) {
     const uint16_t result = m[8] | (m[9] << 8);
     if (req == IC_ADVISE)
       this->icomm_advise_waiting_ = false;
+    if (req == IC_RAW_REQUEST) {
+      // A raw request iComm can't send (e.g. 0xF447 for a controller it has marked dead) is answered with a
+      // type-1 error instead of a type-8 reply. Fail it now rather than waiting out the timeout.
+      const uint32_t inv = m[2] | (m[3] << 8) | (m[4] << 16) | ((uint32_t) m[5] << 24);
+      if (this->busy_ && this->via_icomm_() && inv == this->icomm_raw_invoke_) {
+        ESP_LOGD(TAG, "iComm refused raw request %02X/%02X to %u (0x%04X)", this->current_.drv, this->current_.cmd,
+                 this->current_.dst, result);
+        // iComm only refuses like this for a controller it has marked dead: remember it, so the next device
+        // summary for it is answered straight away instead of waiting on iComm again.
+        if (result == IC_STATUS_RAW_DEAD)
+          this->set_device_alive_(this->current_.dst, false);
+        this->finish_(false, 0xFF, nullptr, 0);
+      }
+      return;
+    }
     if (req == IC_WRITE)
       ESP_LOGI(TAG, "iComm write %s (0x%04X)", result == IC_STATUS_OK ? "OK" : "FAILED", result);
     else if (result != IC_STATUS_OK)
@@ -1456,7 +1602,688 @@ void GenesisBus::tcp_loop_(uint32_t now) {
     this->bridge_len_ = body + 8;
     this->bridge_seq_ = this->tcp_parser_.hdr()[0];
     this->bridge_dst_ = this->tcp_parser_.hdr()[1];
+    this->bridge_drv_ = this->tcp_parser_.hdr()[2];
+    this->bridge_flag_ = this->tcp_parser_.hdr()[5];
+    this->bridge_cmd_ = this->tcp_parser_.hdr()[6];
+    this->bridge_data_len_ = this->tcp_parser_.data_len();
     this->bridge_pending_ = true;
+  }
+}
+
+
+// ------------------------------------------------------------------ iComm server (Supervisor -> ESP)
+//
+// Supervisor talks to an iComm server on TCP 20000. This answers the same messages, so Supervisor can connect to
+// the ESP directly: the session / connection / device list handshake, raw bus commands (type 7, used for logon,
+// status, config-file chunks and block records), subscriptions (polled on the bus and pushed as type-3 updates),
+// System~ConfigKey reads, and User Variable writes. Raw commands and polls go through the same request engine as
+// everything else, so this works on the serial bus and when the ESP itself is relaying through an iComm server.
+
+bool GenesisBus::server_client_connected() const {
+  for (const auto &c : this->server_clients_)
+    if (c.fd >= 0)
+      return true;
+  return false;
+}
+
+// Output number + 1 (as used by MVO 2/9) for a field name; 0 = not a live output we can poll.
+static uint8_t server_output_for_field(const char *f) {
+  static constexpr struct {
+    const char *name;
+    uint8_t out;
+  } MAP[] = {{"OUTPUT", 1},  {"Value", 1},  {"State", 1},   {"Direct", 1},  {"Running", 1}, {"Maximum", 1},
+             {"Output 1", 1}, {"Reverse", 2}, {"Done", 2},     {"Request", 2}, {"Minimum", 2}, {"Output 2", 2},
+             {"Time", 3},    {"Fail", 3},   {"Average", 3}, {"Output 3", 3}, {"Output 4", 4}};
+  for (const auto &m : MAP)
+    if (strcasecmp(f, m.name) == 0)
+      return m.out;
+  return 0;
+}
+
+// "1:4" -> 4 (connection must be ours). Returns 0 when it can't be parsed.
+static uint8_t server_parse_device(const uint8_t *p, size_t max, uint8_t conn) {
+  char buf[17] = {0};
+  memcpy(buf, p, std::min<size_t>(max, 16));
+  unsigned c = 0, d = 0;
+  if (sscanf(buf, "%u:%u", &c, &d) != 2 || c != conn || d == 0 || d > 254)
+    return 0;
+  return d;
+}
+
+void GenesisBus::server_close_(size_t idx) {
+  ServerClient &c = this->server_clients_[idx];
+  if (c.fd >= 0) {
+    ::close(c.fd);
+    ESP_LOGI(TAG, "iComm server: client %u disconnected", (unsigned) idx);
+  }
+  c.fd = -1;
+  c.rx_len = 0;
+  c.raw_pending = false;
+  c.raw_inflight = false;
+  c.update_invoke_set = false;
+  c.gen++;
+  // drop its subscriptions
+  size_t w = 0;
+  for (size_t r = 0; r < this->server_subs_.size(); r++)
+    if (this->server_subs_[r].client != idx)
+      this->server_subs_[w++] = this->server_subs_[r];
+  this->server_subs_.resize(w);
+}
+
+void GenesisBus::server_send_(size_t idx, uint16_t type, uint32_t invoke, const void *body, size_t len) {
+  ServerClient &c = this->server_clients_[idx];
+  if (c.fd < 0)
+    return;
+  if (10 + len > SERVER_TX_BUF) {
+    ESP_LOGE(TAG, "iComm server: reply too large (%u)", (unsigned) len);
+    return;
+  }
+  uint8_t *m = this->server_tx_;
+  const uint16_t l = 6 + len;
+  m[0] = 0x78;
+  m[1] = 0x56;
+  m[2] = l & 0xFF;
+  m[3] = l >> 8;
+  m[4] = type & 0xFF;
+  m[5] = type >> 8;
+  memcpy(m + 6, &invoke, 4);
+  if (len > 0)
+    memcpy(m + 10, body, len);
+  const size_t total = 10 + len;
+  size_t sent = 0;
+  const uint32_t start = millis();
+  while (sent < total) {
+    ssize_t r = ::send(c.fd, m + sent, total - sent, MSG_DONTWAIT);
+    if (r > 0) {
+      sent += r;
+      continue;
+    }
+    if ((r < 0 && errno != EAGAIN && errno != EWOULDBLOCK) || millis() - start > IC_SEND_WAIT_MS)
+      break;
+    fd_set wfds;
+    FD_ZERO(&wfds);
+    FD_SET(c.fd, &wfds);
+    struct timeval tv {
+      0, 20000
+    };
+    ::select(c.fd + 1, nullptr, &wfds, nullptr, &tv);
+  }
+  if (sent != total) {
+    ESP_LOGW(TAG, "iComm server: send to client %u failed", (unsigned) idx);
+    this->server_close_(idx);
+    return;
+  }
+  c.last_tx = App.get_loop_component_start_time();
+}
+
+bool GenesisBus::server_enqueue_(uint8_t dst, uint8_t drv, uint8_t cmd, RequestKind kind, uint8_t client, uint8_t gen,
+                                 uint32_t invoke, const uint8_t *payload, uint8_t len) {
+  Request r;
+  r.dst = dst;
+  r.drv = drv;
+  r.cmd = cmd;
+  r.kind = kind;
+  r.client = client;
+  r.client_gen = gen;
+  r.invoke = invoke;
+  r.len = std::min<uint8_t>(len, REQ_PAYLOAD);
+  if (payload != nullptr && r.len > 0)
+    memcpy(r.payload, payload, r.len);
+  if (!this->queue_.push(r)) {
+    ESP_LOGW(TAG, "iComm server: queue full, dropping drv=%02X cmd=%02X for %u", drv, cmd, dst);
+    return false;
+  }
+  return true;
+}
+
+void GenesisBus::server_device_summary_(size_t idx, uint8_t gen, uint32_t invoke, uint8_t address) {
+  // 0x13 body: name[32], u16 1, u16 0x0A, u32 ConfigKey, firmware (2 bytes as in SYSTEM_READ), u16 block count,
+  // u16 3. A dead controller gets an empty body. Always read fresh so ConfigKey and the count are current.
+  // A controller we already know is dead is answered straight away (as iComm does): asking it again costs a
+  // reply timeout, and through an iComm server a raw request to a dead controller is never answered at all.
+  const DeviceState *dev = this->find_device_(address);
+  if (dev != nullptr && dev->checked && !dev->alive) {
+    this->server_send_(idx, IC_DEV_SUMMARY_REPLY, invoke, nullptr, 0);
+    return;
+  }
+  if (!this->server_enqueue_(address, DRV_STATUS, CMD_SYSTEM_READ, REQ_SERVER_SYS, idx, gen, invoke))
+    this->server_send_(idx, IC_DEV_SUMMARY_REPLY, invoke, nullptr, 0);
+}
+
+void GenesisBus::server_loop_(uint32_t now) {
+  if (this->server_listen_fd_ < 0) {
+    if (!network::is_connected() || (this->server_listen_try_ != 0 &&
+                                     (int32_t) (now - this->server_listen_try_) < (int32_t) SERVER_LISTEN_RETRY_MS))
+      return;
+    this->server_listen_try_ = now;
+    int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0)
+      return;
+    int one = 1;
+    ::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+    struct sockaddr_in addr {};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    addr.sin_port = htons(this->server_port_);
+    if (::bind(fd, (struct sockaddr *) &addr, sizeof(addr)) != 0 || ::listen(fd, 2) != 0) {
+      ESP_LOGE(TAG, "iComm server: bind/listen on %u failed", this->server_port_);
+      ::close(fd);
+      return;
+    }
+    ::fcntl(fd, F_SETFL, ::fcntl(fd, F_GETFL, 0) | O_NONBLOCK);
+    this->server_listen_fd_ = fd;
+    ESP_LOGI(TAG, "iComm server listening on port %u (Supervisor can connect here)", this->server_port_);
+  }
+
+  struct sockaddr_in peer {};
+  socklen_t plen = sizeof(peer);
+  int fd = ::accept(this->server_listen_fd_, (struct sockaddr *) &peer, &plen);
+  if (fd >= 0) {
+    size_t slot = MAX_SERVER_CLIENTS;
+    for (size_t i = 0; i < MAX_SERVER_CLIENTS && slot == MAX_SERVER_CLIENTS; i++)
+      if (this->server_clients_[i].fd < 0)
+        slot = i;
+    if (slot == MAX_SERVER_CLIENTS) {
+      ESP_LOGW(TAG, "iComm server: too many clients, refusing one");
+      ::close(fd);
+    } else {
+      ::fcntl(fd, F_SETFL, ::fcntl(fd, F_GETFL, 0) | O_NONBLOCK);
+      int one = 1;
+      ::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+      ServerClient &c = this->server_clients_[slot];
+      c.fd = fd;
+      c.gen++;
+      c.rx_len = 0;
+      c.raw_pending = false;
+      c.raw_inflight = false;
+      c.update_invoke_set = false;
+      c.last_tx = now;
+      char ip[16];
+      inet_ntoa_r(peer.sin_addr, ip, sizeof(ip));
+      ESP_LOGI(TAG, "iComm server: client %u connected from %s", (unsigned) slot, ip);
+    }
+  }
+
+  for (size_t i = 0; i < MAX_SERVER_CLIENTS; i++) {
+    ServerClient &c = this->server_clients_[i];
+    if (c.fd < 0)
+      continue;
+    const size_t space = SERVER_RX_BUF - c.rx_len;
+    if (space > 0) {
+      ssize_t n = ::recv(c.fd, c.rx + c.rx_len, space, MSG_DONTWAIT);
+      if (n == 0 || (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK)) {
+        this->server_close_(i);
+        continue;
+      }
+      if (n > 0)
+        c.rx_len += n;
+    }
+    while (c.fd >= 0 && c.rx_len >= 4) {
+      const size_t len = c.rx[2] | (c.rx[3] << 8);
+      if (c.rx[0] != 0x78 || c.rx[1] != 0x56 || 4 + len > SERVER_RX_BUF || len < 6) {
+        ESP_LOGW(TAG, "iComm server: framing lost on client %u", (unsigned) i);
+        this->server_close_(i);
+        break;
+      }
+      if (c.rx_len < 4 + len)
+        break;
+      const uint16_t type = c.rx[4] | (c.rx[5] << 8);
+      uint32_t invoke;
+      memcpy(&invoke, c.rx + 6, 4);
+      this->server_handle_(i, type, invoke, c.rx + 10, len - 6);
+      if (c.fd < 0)
+        break;
+      c.rx_len -= 4 + len;
+      memmove(c.rx, c.rx + 4 + len, c.rx_len);
+    }
+    if (c.fd >= 0 && (int32_t) (now - c.last_tx) > (int32_t) SERVER_KEEPALIVE_MS)
+      this->server_send_(i, IC_KEEPALIVE, 0, nullptr, 0);
+  }
+
+  this->server_poll_(now);
+  this->server_flush_updates_();
+}
+
+void GenesisBus::server_handle_(size_t idx, uint16_t type, uint32_t invoke, const uint8_t *b, size_t len) {
+  ServerClient &c = this->server_clients_[idx];
+  uint8_t reply[64];
+  switch (type) {
+    case IC_HELLO: {
+      char app[33] = {0};
+      if (len >= 34)
+        memcpy(app, b + 2, 32);
+      ESP_LOGI(TAG, "iComm server: client %u is '%s'", (unsigned) idx, app);
+      const uint16_t hdr[2] = {IC_HELLO, IC_STATUS_OK};
+      memcpy(reply, hdr, 4);
+      memcpy(reply + 4, SERVER_OK_TAIL, 4);
+      this->server_send_(idx, IC_REPLY, invoke, reply, 8);
+      break;
+    }
+    case IC_SESSION: {
+      // 0a 00 02 00 00 00 41 00 + 16 bytes (a per-session random key in iComm)
+      static constexpr uint8_t HEAD[] = {0x0A, 0x00, 0x02, 0x00, 0x00, 0x00, 0x41, 0x00};
+      memcpy(reply, HEAD, sizeof(HEAD));
+      for (size_t k = 0; k < 16; k += 4) {
+        const uint32_t r = random_uint32();
+        memcpy(reply + 8 + k, &r, 4);
+      }
+      this->server_send_(idx, IC_SESSION_REPLY, invoke, reply, 24);
+      break;
+    }
+    case IC_CONN_LIST: {
+      uint8_t body[SERVER_CONN_LIST_LEN] = {0};
+      memcpy(body, SERVER_CONN_LIST, sizeof(SERVER_CONN_LIST));
+      this->server_send_(idx, IC_CONN_LIST_REPLY, invoke, body, sizeof(body));
+      break;
+    }
+    case IC_CONN_INFO: {
+      uint8_t body[SERVER_CONN_INFO_LEN] = {0};
+      memcpy(body, SERVER_CONN_INFO, sizeof(SERVER_CONN_INFO));
+      this->server_send_(idx, IC_CONN_INFO_REPLY, invoke, body, sizeof(body));
+      break;
+    }
+    case IC_DEV_LIST: {
+      // u16 count, then per device: u16 1, u16 1, u16 address, name\0, address as text\0
+      uint8_t body[SERVER_TX_BUF - 16];
+      size_t o = 2;
+      uint16_t count = 0;
+      for (const auto &d : this->devices_) {
+        char name[24];
+        if (d.name[0] != '\0')
+          snprintf(name, sizeof(name), "%s", d.name);
+        else
+          snprintf(name, sizeof(name), "Controller %u", d.address);
+        char addr[4];
+        snprintf(addr, sizeof(addr), "%u", d.address);
+        const size_t need = 6 + strlen(name) + 1 + strlen(addr) + 1;
+        if (o + need > sizeof(body))
+          break;
+        const uint16_t f[3] = {1, 1, d.address};
+        memcpy(body + o, f, 6);
+        o += 6;
+        memcpy(body + o, name, strlen(name) + 1);
+        o += strlen(name) + 1;
+        memcpy(body + o, addr, strlen(addr) + 1);
+        o += strlen(addr) + 1;
+        count++;
+      }
+      memcpy(body, &count, 2);
+      this->server_send_(idx, IC_DEV_LIST_REPLY, invoke, body, o);
+      break;
+    }
+    case IC_DEV_SUMMARY: {
+      const uint8_t dev = server_parse_device(b, len, this->icomm_conn_);
+      if (dev == 0)
+        this->server_send_(idx, IC_DEV_SUMMARY_REPLY, invoke, nullptr, 0);
+      else
+        this->server_device_summary_(idx, c.gen, invoke, dev);
+      break;
+    }
+    case IC_RAW_REQUEST: {
+      // 32-byte struct (see icomm_raw_) then the payload
+      if (len < 33) {
+        const uint16_t r[2] = {0, 0};
+        this->server_send_(idx, IC_RAW_REPLY, invoke, r, 4);
+        break;
+      }
+      char dtxt[3] = {(char) b[8], (char) b[9], 0};
+      const unsigned dev = (unsigned) atoi(dtxt);
+      uint16_t cmd, drv, plen;
+      memcpy(&cmd, b + 26, 2);
+      memcpy(&drv, b + 28, 2);
+      memcpy(&plen, b + 30, 2);
+      if (dev == 0 || dev > 254 || plen > MAX_FRAME_DATA || 32 + plen > len || c.raw_pending || c.raw_inflight) {
+        ESP_LOGW(TAG, "iComm server: bad or overlapping raw request from client %u", (unsigned) idx);
+        const uint16_t r[2] = {0, 0};
+        this->server_send_(idx, IC_RAW_REPLY, invoke, r, 4);
+        break;
+      }
+      c.raw_invoke = invoke;
+      c.raw_dst = dev;
+      c.raw_drv = drv;
+      c.raw_cmd = cmd;
+      c.raw_flag = b[25];
+      c.raw_len = plen;
+      memcpy(c.raw_buf, b + 32, plen);
+      c.raw_pending = true;
+      ESP_LOGV(TAG, "iComm server: raw %02X/%02X to %u from client %u", drv, cmd, dev, (unsigned) idx);
+      break;
+    }
+    case IC_ADVISE: {
+      if (len < 2)
+        break;
+      int16_t count;
+      memcpy(&count, b, 2);
+      if (!c.update_invoke_set) {
+        c.update_invoke = invoke;
+        c.update_invoke_set = true;
+      }
+      for (int16_t r = 0; r < count && 2 + 64u * (r + 1) <= len; r++) {
+        const uint8_t *rec = b + 2 + 64 * r;
+        ServerSub s;
+        s.client = idx;
+        s.client_gen = c.gen;
+        memcpy(&s.handle, rec, 4);
+        s.dev = server_parse_device(rec + 4, 16, this->icomm_conn_);
+        char pt[33] = {0};
+        memcpy(pt, rec + 20, 32);
+        const char *tilde = strchr(pt, '~');
+        if (s.dev != 0 && strcasecmp(pt, "System~ConfigKey") == 0) {
+          s.out = 0;
+        } else if (s.dev != 0 && pt[0] == '@' && tilde != nullptr) {
+          s.seq = (uint8_t) atoi(pt + 1);
+          s.out = server_output_for_field(tilde + 1);
+          if (s.out == 0 || s.seq == 0) {
+            s.status = IC_STATUS_BAD_FIELD;  // a parameter or unknown field: not supported for subscriptions
+            s.dirty = true;
+          }
+        } else {
+          s.status = IC_STATUS_BAD_FIELD;  // block names aren't resolved
+          s.dirty = true;
+        }
+        if (this->server_subs_.size() >= MAX_SERVER_SUBS) {
+          ESP_LOGW(TAG, "iComm server: too many subscriptions");
+          break;
+        }
+        this->server_subs_.push_back(s);
+      }
+      const uint16_t hdr[2] = {IC_ADVISE, IC_STATUS_OK};
+      memcpy(reply, hdr, 4);
+      memcpy(reply + 4, SERVER_OK_TAIL, 4);
+      this->server_send_(idx, IC_REPLY, invoke, reply, 8);
+      this->server_last_poll_ = 0;  // poll straight away
+      break;
+    }
+    case IC_UNADVISE: {
+      if (len < 2)
+        break;
+      int16_t count;
+      memcpy(&count, b, 2);
+      for (int16_t r = 0; r < count && 2 + 4u * (r + 1) <= len; r++) {
+        uint32_t h;
+        memcpy(&h, b + 2 + 4 * r, 4);
+        size_t w = 0;
+        for (size_t k = 0; k < this->server_subs_.size(); k++) {
+          const ServerSub &s = this->server_subs_[k];
+          if (!(s.client == idx && s.handle == h))
+            this->server_subs_[w++] = s;
+        }
+        this->server_subs_.resize(w);
+      }
+      break;
+    }
+    case 0x0005: {  // read: only System~ConfigKey (iComm 2.38 also refuses live outputs here)
+      const uint8_t dev = len >= 48 ? server_parse_device(b, 16, this->icomm_conn_) : 0;
+      char pt[33] = {0};
+      if (len >= 48)
+        memcpy(pt, b + 16, 32);
+      const DeviceState *d = dev != 0 ? this->find_device_(dev) : nullptr;
+      if (d != nullptr && d->sys_valid && strcasecmp(pt, "System~ConfigKey") == 0) {
+        const uint16_t hdr[2] = {0x0005, IC_STATUS_OK};
+        memcpy(reply, hdr, 4);
+        memcpy(reply + 4, &d->config_key, 4);
+        this->server_send_(idx, IC_REPLY, invoke, reply, 8);
+      } else {
+        const uint16_t hdr[2] = {0x0005, IC_STATUS_ERROR};
+        this->server_send_(idx, IC_REPLY, invoke, hdr, 4);
+      }
+      break;
+    }
+    case IC_WRITE: {  // write: User Variable Value / Output through the safe read-patch-write path
+      bool ok = false;
+      if (len >= 49) {
+        const uint8_t dev = server_parse_device(b, 16, this->icomm_conn_);
+        char pt[33] = {0};
+        memcpy(pt, b + 16, 32);
+        const char *tilde = strchr(pt, '~');
+        const uint8_t dtype = b[48];
+        double v = NAN;
+        if (dtype == 2 && len >= 57)
+          memcpy(&v, b + 49, 8);
+        else if (dtype == 3 && len >= 51)
+          v = b[49] | (b[50] << 8);
+        if (dev != 0 && pt[0] == '@' && tilde != nullptr && !std::isnan(v) &&
+            (strcasecmp(tilde + 1, "Value") == 0 || strcasecmp(tilde + 1, "Output") == 0)) {
+          this->write_user_variable(dev, (uint8_t) atoi(pt + 1), (float) v);
+          ok = true;
+        } else {
+          ESP_LOGW(TAG, "iComm server: write to '%s' not supported", pt);
+        }
+      }
+      uint16_t hdr[2] = {IC_WRITE, ok ? IC_STATUS_OK : IC_STATUS_ERROR};
+      memcpy(reply, hdr, 4);
+      memcpy(reply + 4, SERVER_OK_TAIL, 4);
+      this->server_send_(idx, IC_REPLY, invoke, reply, ok ? 8 : 4);
+      break;
+    }
+    case IC_KEEPALIVE:
+      break;
+    default:
+      ESP_LOGD(TAG, "iComm server: unhandled message type 0x%04X (%u bytes) from client %u", type, (unsigned) len,
+               (unsigned) idx);
+      break;
+  }
+}
+
+void GenesisBus::server_poll_(uint32_t now) {
+  if (this->server_subs_.empty() || this->queue_.size() >= QUEUE_SIZE / 2)
+    return;
+  // ConfigKey subscriptions: refresh SYSTEM_READ now and then
+  if ((int32_t) (now - this->server_last_sys_) >= (int32_t) SERVER_SYS_MS) {
+    this->server_last_sys_ = now;
+    uint8_t done[MAX_DEVICES];
+    size_t nd = 0;
+    for (const auto &s : this->server_subs_) {
+      if (s.out != 0 || s.dev == 0 || s.status == IC_STATUS_BAD_FIELD)
+        continue;
+      bool dup = false;
+      for (size_t k = 0; k < nd && !dup; k++)
+        dup = done[k] == s.dev;
+      if (dup || nd >= MAX_DEVICES)
+        continue;
+      done[nd++] = s.dev;
+      this->server_enqueue_(s.dev, DRV_STATUS, CMD_SYSTEM_READ, REQ_SERVER_SYS, 0xFF, 0, 0);
+    }
+  }
+  if ((int32_t) (now - this->server_last_poll_) < (int32_t) SERVER_POLL_MS)
+    return;
+  this->server_last_poll_ = now;
+  // One MVO per device and max_points_ unique (block, output) pairs, like poll_outputs_().
+  uint8_t devs[MAX_DEVICES];
+  size_t nd = 0;
+  for (const auto &s : this->server_subs_) {
+    if (s.out == 0 || s.dev == 0 || s.status == IC_STATUS_BAD_FIELD)
+      continue;
+    bool dup = false;
+    for (size_t k = 0; k < nd && !dup; k++)
+      dup = devs[k] == s.dev;
+    if (!dup && nd < MAX_DEVICES)
+      devs[nd++] = s.dev;
+  }
+  uint8_t buf[REQ_PAYLOAD];
+  for (size_t k = 0; k < nd; k++) {
+    uint8_t cnt = 0;
+    for (const auto &s : this->server_subs_) {
+      if (s.dev != devs[k] || s.out == 0 || s.status == IC_STATUS_BAD_FIELD)
+        continue;
+      bool dup = false;
+      for (uint8_t j = 0; j < cnt && !dup; j++)
+        dup = buf[1 + 2 * j] == s.seq && buf[2 + 2 * j] == s.out;
+      if (dup)
+        continue;
+      buf[1 + 2 * cnt] = s.seq;
+      buf[2 + 2 * cnt] = s.out;
+      if (++cnt == this->max_points_) {
+        buf[0] = cnt;
+        if (!this->server_enqueue_(devs[k], DRV_BLOCK, CMD_READ_OUTPUTS, REQ_SERVER_MVO, 0xFF, 0, 0, buf, 1 + 2 * cnt))
+          return;
+        cnt = 0;
+      }
+    }
+    if (cnt > 0) {
+      buf[0] = cnt;
+      if (!this->server_enqueue_(devs[k], DRV_BLOCK, CMD_READ_OUTPUTS, REQ_SERVER_MVO, 0xFF, 0, 0, buf, 1 + 2 * cnt))
+        return;
+    }
+  }
+}
+
+void GenesisBus::server_flush_updates_() {
+  // Type 3: u16 count, then records u32 handle, u16 status, u8 value type, value (2 = f64, 4 = u32, 0 = none).
+  for (size_t i = 0; i < MAX_SERVER_CLIENTS; i++) {
+    ServerClient &c = this->server_clients_[i];
+    if (c.fd < 0)
+      continue;
+    uint8_t body[SERVER_TX_BUF - 16];
+    size_t o = 2;
+    uint16_t count = 0;
+    for (auto &s : this->server_subs_) {
+      if (s.client != i || s.client_gen != c.gen || !s.dirty)
+        continue;
+      if (o + 15 > sizeof(body))
+        break;
+      memcpy(body + o, &s.handle, 4);
+      memcpy(body + o + 4, &s.status, 2);
+      o += 6;
+      if (s.status != IC_STATUS_OK) {
+        body[o++] = 0;
+      } else if (s.out == 0) {
+        body[o++] = 4;
+        memcpy(body + o, &s.raw, 4);
+        o += 4;
+      } else {
+        float f;
+        memcpy(&f, &s.raw, 4);
+        const double v = f;
+        body[o++] = 2;
+        memcpy(body + o, &v, 8);
+        o += 8;
+      }
+      s.dirty = false;
+      count++;
+    }
+    if (count == 0)
+      continue;
+    memcpy(body, &count, 2);
+    this->server_send_(i, IC_UPDATE, c.update_invoke, body, o);
+  }
+}
+
+void GenesisBus::server_finish_(bool ok, uint8_t status, const uint8_t *d, size_t n) {
+  const Request &r = this->current_;
+  const bool for_client = r.client < MAX_SERVER_CLIENTS && this->server_clients_[r.client].fd >= 0 &&
+                          this->server_clients_[r.client].gen == r.client_gen;
+  switch (r.kind) {
+    case REQ_SERVER_RAW: {
+      if (r.client < MAX_SERVER_CLIENTS)
+        this->server_clients_[r.client].raw_inflight = false;
+      if (!for_client)
+        break;
+      if (!ok) {
+        // Like iComm: a raw request that got no answer (dead controller) is refused with a type-1 0xF447.
+        const uint16_t hdr[2] = {IC_RAW_REQUEST, IC_STATUS_RAW_DEAD};
+        this->server_send_(r.client, IC_REPLY, r.invoke, hdr, 4);
+        break;
+      }
+      // u16 result (1 = OK), u16 data length, data.
+      uint8_t body[4 + MAX_FRAME_DATA];
+      const uint16_t result = status == 0 ? IC_STATUS_OK : IC_STATUS_ERROR;
+      const uint16_t dl = status == 0 ? std::min<size_t>(n, MAX_FRAME_DATA) : 0;
+      memcpy(body, &result, 2);
+      memcpy(body + 2, &dl, 2);
+      if (dl > 0)
+        memcpy(body + 4, d, dl);
+      this->server_send_(r.client, IC_RAW_REPLY, r.invoke, body, 4 + dl);
+      break;
+    }
+    case REQ_SERVER_MVO: {
+      const uint8_t cnt = r.payload[0];
+      const bool good = ok && status == 0 && n >= 1u + 4u * cnt && d[0] == cnt;
+      for (uint8_t i = 0; i < cnt; i++) {
+        const uint8_t seq = r.payload[1 + 2 * i];
+        const uint8_t out = r.payload[2 + 2 * i];
+        uint32_t raw = 0xFFFFFFFFu;
+        if (good)
+          memcpy(&raw, &d[1 + 4 * i], 4);
+        const uint16_t st = !good ? IC_STATUS_DEVICE_DEAD : (raw == 0xFFFFFFFFu ? IC_STATUS_NO_VALUE : IC_STATUS_OK);
+        for (auto &s : this->server_subs_) {
+          if (s.dev != r.dst || s.seq != seq || s.out != out)
+            continue;
+          if (!s.have || s.status != st || s.raw != raw) {
+            s.have = true;
+            s.status = st;
+            s.raw = raw;
+            s.dirty = st != IC_STATUS_NO_VALUE;  // nothing to report until it has a value
+          }
+        }
+      }
+      break;
+    }
+    case REQ_SERVER_SYS: {
+      DeviceState *dev = this->find_device_(r.dst);
+      const bool valid = ok && status == 0 && n > 0xBB;
+      if (valid && dev != nullptr) {
+        memcpy(dev->name, d, 20);
+        dev->name[20] = '\0';
+        memcpy(&dev->config_key, d + 0x31, 4);
+        dev->fw_lo = d[0xBA];
+        dev->fw_hi = d[0xBB];
+        dev->sys_valid = true;
+      }
+      for (auto &s : this->server_subs_) {
+        if (s.dev != r.dst || s.out != 0 || s.status == IC_STATUS_BAD_FIELD)
+          continue;
+        uint32_t key = 0;
+        if (valid)
+          memcpy(&key, d + 0x31, 4);
+        const uint16_t st = valid ? IC_STATUS_OK : IC_STATUS_DEVICE_DEAD;
+        if (!s.have || s.status != st || s.raw != key) {
+          s.have = true;
+          s.status = st;
+          s.raw = key;
+          s.dirty = true;
+        }
+      }
+      if (!for_client)
+        break;
+      if (!valid) {
+        this->server_send_(r.client, IC_DEV_SUMMARY_REPLY, r.invoke, nullptr, 0);
+        break;
+      }
+      // second step: block count, then the 0x13 reply. Keep this SYSTEM_READ in the device for the reply.
+      if (!this->server_enqueue_(r.dst, DRV_BLOCK, CMD_BLOCK_COUNT, REQ_SERVER_COUNT, r.client, r.client_gen,
+                                 r.invoke))
+        this->server_send_(r.client, IC_DEV_SUMMARY_REPLY, r.invoke, nullptr, 0);
+      break;
+    }
+    case REQ_SERVER_COUNT: {
+      DeviceState *dev = this->find_device_(r.dst);
+      if (dev != nullptr && ok && status == 0 && n >= 1)
+        dev->block_count = d[0];
+      if (!for_client)
+        break;
+      if (!ok || status != 0 || n < 1) {
+        this->server_send_(r.client, IC_DEV_SUMMARY_REPLY, r.invoke, nullptr, 0);
+        break;
+      }
+      uint8_t body[46] = {0};
+      if (dev != nullptr)
+        snprintf((char *) body, 32, "%s", dev->name);
+      const uint16_t one = 1, typ = 0x0A, blocks = d[0], tail = 3;
+      memcpy(body + 32, &one, 2);
+      memcpy(body + 34, &typ, 2);
+      if (dev != nullptr) {
+        memcpy(body + 36, &dev->config_key, 4);
+        body[40] = dev->fw_lo;
+        body[41] = dev->fw_hi;
+      }
+      memcpy(body + 42, &blocks, 2);
+      memcpy(body + 44, &tail, 2);
+      this->server_send_(r.client, IC_DEV_SUMMARY_REPLY, r.invoke, body, sizeof(body));
+      break;
+    }
+    default:
+      break;
   }
 }
 

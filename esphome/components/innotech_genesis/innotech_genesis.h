@@ -47,6 +47,11 @@ static constexpr uint8_t MAX_POINTS_PER_MESSAGE = 30;
 static constexpr size_t MAX_PENDING_WRITES = 8;
 static constexpr size_t IC_RX_BUF = 4608;  // iComm batches updates up to 4096 bytes
 static constexpr size_t IC_TX_BUF = 1400;  // advise batch of 20 points = 1292 bytes
+// iComm server (Supervisor connects to the ESP as if it were an iComm server)
+static constexpr size_t MAX_SERVER_CLIENTS = 3;  // Supervisor opens two connections
+static constexpr size_t SERVER_RX_BUF = 2048;     // biggest request: an advise of 20 points (1292 bytes)
+static constexpr size_t SERVER_TX_BUF = 1400;     // biggest reply: a raw reply (8 + 512 bytes) or an update batch
+static constexpr size_t MAX_SERVER_SUBS = 96;     // subscriptions across all clients
 
 class GenesisClimate;
 
@@ -90,6 +95,11 @@ enum RequestKind : uint8_t {
   REQ_SCAN_BLOCK,   // 2/5 one block during a scan
   REQ_BRIDGE,       // raw frame from the TCP bridge client
   REQ_PARAM_READ,   // 2/5 read a block record for parameter points (e.g. a Digital Output's Forced flag)
+  REQ_SERVER_RAW,   // raw request from an iComm server client (Supervisor), answered with a type-8 reply
+  REQ_SERVER_MVO,   // 2/9 poll for the server's subscriptions
+  REQ_SERVER_SYS,   // 9/1 for ConfigKey / device summary (optionally answering a client's 0x0F)
+  REQ_SERVER_COUNT, // 2/8 block count, second step of a client's 0x0F device summary
+  REQ_BRIDGE_ICOMM, // a TCP bridge frame sent through the ESP's own iComm connection (iComm mode)
 };
 
 // Parameter points: values that live in the block record (section 2) instead of the live outputs.
@@ -118,6 +128,11 @@ struct Request {
   uint8_t cmd{0};
   uint8_t kind{REQ_STATUS};
   uint8_t len{0};
+  uint8_t flag{0};  // Net header flag byte (iComm clients send 03 / 05)
+  // iComm server context: which client / message this request answers (client 0xFF = none)
+  uint8_t client{0xFF};
+  uint8_t client_gen{0};
+  uint32_t invoke{0};
   uint8_t payload[REQ_PAYLOAD];
 };
 
@@ -133,10 +148,17 @@ struct DeviceState {
   uint8_t address{0};
   bool alive{false};
   bool checked{false};
+  bool seen{false};  // has answered at least once (since boot / the last transport switch)
   uint8_t failures{0};
   uint32_t last_status{0};
   float firmware{0};
   char name[21]{};
+  // From SYSTEM_READ / block count, for the iComm server's device summary and System~ConfigKey
+  bool sys_valid{false};
+  uint32_t config_key{0};
+  uint8_t fw_lo{0};
+  uint8_t fw_hi{0};
+  uint16_t block_count{0};
 #ifdef USE_BINARY_SENSOR
   binary_sensor::BinarySensor *online_sensor{nullptr};
 #endif
@@ -170,6 +192,41 @@ struct Point {
 
 enum Transport : uint8_t { TRANSPORT_SERIAL = 0, TRANSPORT_ICOMM = 1, TRANSPORT_AUTO = 2 };
 
+// One connection from Supervisor (or another iComm client) to the ESP's iComm server.
+struct ServerClient {
+  int fd{-1};
+  uint8_t gen{0};                // bumped on every new connection, so late replies can't reach a newer client
+  uint32_t last_tx{0};
+  uint32_t update_invoke{0};     // echoed in type-3 updates (iComm uses the client's first advise invoke)
+  bool update_invoke_set{false};
+  size_t rx_len{0};
+  uint8_t rx[SERVER_RX_BUF];
+  // one raw request at a time (Supervisor waits for each reply)
+  bool raw_pending{false};
+  bool raw_inflight{false};
+  uint32_t raw_invoke{0};
+  uint8_t raw_dst{0};
+  uint8_t raw_drv{0};
+  uint8_t raw_cmd{0};
+  uint8_t raw_flag{0};
+  uint16_t raw_len{0};
+  uint8_t raw_buf[MAX_FRAME_DATA];
+};
+
+// A client's subscription (advise). out = output number + 1 as used by MVO; 0 = System~ConfigKey.
+struct ServerSub {
+  uint8_t client{0};
+  uint8_t client_gen{0};
+  uint32_t handle{0};
+  uint8_t dev{0};
+  uint8_t seq{0};
+  uint8_t out{0};
+  bool have{false};
+  bool dirty{false};
+  uint16_t status{0};
+  uint32_t raw{0};
+};
+
 class GenesisBus : public Component, public uart::UARTDevice {
  public:
   void setup() override;
@@ -192,6 +249,7 @@ class GenesisBus : public Component, public uart::UARTDevice {
   void set_icomm_port(uint16_t port) { this->icomm_port_ = port; }
   void set_icomm_connection(uint8_t conn) { this->icomm_conn_ = conn; }
   void set_icomm_name(const char *name) { this->icomm_name_ = name; }
+  void set_server_port(uint16_t port) { this->server_port_ = port; }
   // Runtime settings (e.g. from template text / select entities in the release firmware).
   // set_icomm_server: an IP address replaces icomm_hosts; an empty string goes back to the YAML's icomm_hosts.
   void set_icomm_server(const std::string &host);
@@ -225,7 +283,11 @@ class GenesisBus : public Component, public uart::UARTDevice {
   // Status for the LED / diagnostics
   bool any_alive() const;
   bool all_alive() const;
+  // A controller that was answering has stopped. Addresses that never answered don't count, so a config can
+  // list addresses that don't exist (or an RS232 hookup that only reaches one controller) without looking faulty.
+  bool any_lost() const;
   bool tcp_client_connected() const { return this->client_fd_ >= 0; }
+  bool server_client_connected() const;
   uint32_t last_activity() const { return this->last_activity_; }
   uint32_t frames_ok() const { return this->frames_ok_; }
   uint32_t timeouts() const { return this->timeouts_; }
@@ -259,6 +321,18 @@ class GenesisBus : public Component, public uart::UARTDevice {
   void tcp_setup_();
   void tcp_loop_(uint32_t now);
   void tcp_close_client_();
+
+  // iComm server for Supervisor (listens on server_port_, usually 20000)
+  void server_loop_(uint32_t now);
+  void server_close_(size_t idx);
+  void server_handle_(size_t idx, uint16_t type, uint32_t invoke, const uint8_t *body, size_t len);
+  void server_send_(size_t idx, uint16_t type, uint32_t invoke, const void *body, size_t len);
+  void server_poll_(uint32_t now);
+  void server_flush_updates_();
+  void server_finish_(bool ok, uint8_t status, const uint8_t *d, size_t n);
+  void server_device_summary_(size_t idx, uint8_t gen, uint32_t invoke, uint8_t address);
+  bool server_enqueue_(uint8_t dst, uint8_t drv, uint8_t cmd, RequestKind kind, uint8_t client, uint8_t gen,
+                       uint32_t invoke, const uint8_t *payload = nullptr, uint8_t len = 0);
 
   // iComm TCP client (the protocol Supervisor speaks to iComm on port 20000)
   void icomm_loop_(uint32_t now);
@@ -327,6 +401,20 @@ class GenesisBus : public Component, public uart::UARTDevice {
   size_t bridge_len_{0};
   uint8_t bridge_dst_{0};
   uint8_t bridge_seq_{0};
+  uint8_t bridge_drv_{0};
+  uint8_t bridge_cmd_{0};
+  uint8_t bridge_flag_{0};
+  uint16_t bridge_data_len_{0};  // the frame's data starts at bridge_buf_ + 6 + 11
+
+  // iComm server
+  uint16_t server_port_{0};
+  int server_listen_fd_{-1};
+  uint32_t server_listen_try_{0};
+  uint32_t server_last_poll_{0};
+  uint32_t server_last_sys_{0};
+  ServerClient server_clients_[MAX_SERVER_CLIENTS];
+  StaticVector<ServerSub, MAX_SERVER_SUBS> server_subs_;
+  uint8_t server_tx_[SERVER_TX_BUF];
 
   // iComm client
   bool active_icomm_{false};
