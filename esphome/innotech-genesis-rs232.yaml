@@ -9,6 +9,7 @@
 substitutions:
   bus_tx_pin: GPIO41  # T-RSS3 RS232 TX
   bus_rx_pin: GPIO42  # T-RSS3 RS232 RX
+  bus_tx_strapping: "false"
 
 packages:
   base: !include innotech-genesis.yaml
