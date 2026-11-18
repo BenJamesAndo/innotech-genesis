@@ -8,6 +8,10 @@
 # Wi-Fi: on first boot (or when it can't connect) it starts a hotspot called "innotech-genesis-xxxxxx".
 # Join it and pick your network in the page that opens.
 #
+# iComm: to use an existing iComm server instead of (or as a fallback to) the serial bus, enter its IP in the
+# "iComm server" setting and pick a "Connection mode" (auto = serial bus first, iComm when no controller answers).
+# Both are on the device page in Home Assistant and on the ESP's own web page, and survive reboots.
+#
 # Wiring: RS485 A/B/GND to the controllers' NET +/-/SCN terminals. Don't leave another bus master
 # (e.g. an iComm server's CONV232) on the same bus unless you set `polling: false`.
 # Protocol notes: docs/PROTOCOL.md
@@ -23,7 +27,7 @@ esphome:
   comment: Innotech Genesis II BMS bridge (LilyGO T-RSS3)
   project:
     name: benjamesando.innotech-genesis
-    version: "1.0.0"
+    version: "1.1.0"
 
 esp32:
   board: esp32-s3-devkitc-1
@@ -57,7 +61,9 @@ captive_portal:
 
 uart:
   - id: uart_rs485
-    tx_pin: GPIO3
+    tx_pin:
+      number: GPIO3
+      ignore_strapping_warning: true  # the T-RSS3 wires RS485 TX to GPIO3
     rx_pin: GPIO2
     baud_rate: 9600
     rx_buffer_size: 1024
@@ -66,12 +72,41 @@ innotech_genesis:
   - id: genesis
     uart_id: uart_rs485
     flow_control_pin: GPIO4  # RS485 driver enable
-    tcp_port: 10001          # iComm "TCP/IP" connection pointed here gets a straight-through serial stream
-    transport: serial
+    tcp_port: 10001          # for an iComm server's "TCP/IP" connection (raw serial stream; Supervisor can't connect here)
+    transport: auto          # changed at runtime by the "Connection mode" setting below
     devices: [1, 2, 3, 4, 5, 6, 7, 8]
 
-# Status LED (WS2812 on GPIO1): green = all controllers answering, yellow = some, red = none,
-# purple = something is using the TCP bridge, brief white blink = bus traffic.
+text:
+  - platform: template
+    id: icomm_server
+    name: iComm server
+    icon: mdi:server-network
+    mode: text
+    max_length: 15
+    optimistic: true
+    restore_value: true
+    initial_value: ""
+    entity_category: config
+    on_value:
+      - lambda: id(genesis).set_icomm_server(x);
+
+select:
+  - platform: template
+    id: connection_mode
+    name: Connection mode
+    icon: mdi:swap-horizontal
+    options: [serial, icomm, auto]  # same order as the component's transport values
+    initial_option: auto
+    optimistic: true
+    restore_value: true
+    entity_category: config
+    on_value:
+      - lambda: id(genesis).set_transport_mode(i);
+
+# Status LED (WS2812 on GPIO1)
+#   serial bus: green = all controllers answering, yellow = some, red = none
+#   via iComm: blue = connected with live data, orange = connected but no controller alive, red = not connected
+#   purple = something is using the TCP bridge, brief white blink = bus traffic
 light:
   - platform: esp32_rmt_led_strip
     id: status_led
@@ -92,6 +127,7 @@ interval:
           uint32_t c;
           if (millis() - id(genesis).last_activity() < 120) c = 0xFFFFFF;
           else if (id(genesis).tcp_client_connected()) c = 0x8000FF;
+          else if (id(genesis).using_icomm()) c = !id(genesis).icomm_connected() ? 0xFF0000 : (id(genesis).any_alive() ? 0x0040FF : 0xFF6000);
           else if (id(genesis).all_alive()) c = 0x00FF00;
           else if (id(genesis).any_alive()) c = 0xFFA000;
           else c = 0xFF0000;
@@ -104,6 +140,15 @@ interval:
           call.perform();
 
 binary_sensor:
+  - platform: template
+    name: Using iComm server
+    lambda: return id(genesis).using_icomm();
+    entity_category: diagnostic
+  - platform: template
+    name: iComm connected
+    lambda: return id(genesis).icomm_connected();
+    device_class: connectivity
+    entity_category: diagnostic
   - { platform: innotech_genesis, type: online, address: 1, name: "Controller 1 online", device_class: connectivity }
   - { platform: innotech_genesis, type: online, address: 2, name: "Controller 2 online", device_class: connectivity }
   - { platform: innotech_genesis, type: online, address: 3, name: "Controller 3 online", device_class: connectivity }

@@ -37,9 +37,9 @@ ADDRESS = cv.int_range(min=1, max=254)
 BLOCK = cv.int_range(min=1, max=255)
 
 def _consume_sockets(config):
+    # One socket for the iComm client, always: the server can also be set at runtime (set_icomm_server).
+    socket.consume_sockets(1, "innotech_genesis_icomm")(config)
     # The TCP bridge needs one listening socket and one client (plus one spare for a replacing client).
-    if config.get(CONF_ICOMM_HOSTS):
-        socket.consume_sockets(1, "innotech_genesis_icomm")(config)
     if config[CONF_TCP_PORT]:
         socket.consume_sockets(2, "innotech_genesis")(config)
         socket.consume_sockets(1, "innotech_genesis", socket.SocketType.TCP_LISTEN)(config)
@@ -55,7 +55,7 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_UPDATE_INTERVAL, default="5s"): cv.positive_time_period_milliseconds,
             cv.Optional(CONF_STATUS_INTERVAL, default="60s"): cv.positive_time_period_milliseconds,
             cv.Optional(CONF_REPLY_TIMEOUT, default="1000ms"): cv.positive_time_period_milliseconds,
-            cv.Optional(CONF_MAX_POINTS, default=20): cv.int_range(min=1, max=60),
+            cv.Optional(CONF_MAX_POINTS, default=20): cv.int_range(min=1, max=30),
             cv.Optional(CONF_SAVE_TO_FLASH, default=True): cv.boolean,
             cv.Optional(CONF_POLLING, default=True): cv.boolean,
             cv.Optional(CONF_DEVICES, default=[]): cv.ensure_list(ADDRESS),

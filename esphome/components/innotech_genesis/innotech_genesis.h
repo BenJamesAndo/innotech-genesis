@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <string>
 
 #include "esphome/core/component.h"
 #include "esphome/core/hal.h"
@@ -26,7 +27,7 @@
 namespace esphome {
 namespace innotech_genesis {
 
-// Innotech Genesis II "Net" protocol (see docs/PROTOCOL.md):
+// Innotech Genesis II "Net" protocol (see gcc-bms/protocol/PROTOCOL.md):
 //   FF FF FF FF 22 DD | hdr[9] | crc16 | data[n] | crc16 | FF FF
 //   request hdr: seq, dst, drv, src(FF), 0, flag, cmd, len16
 //   reply hdr:   seq, FF, 0, src, drv, 0, status, len16
@@ -184,10 +185,18 @@ class GenesisBus : public Component, public uart::UARTDevice {
   void set_save_to_flash(bool v) { this->save_to_flash_ = v; }
   void set_polling(bool v) { this->polling_ = v; }
   void set_transport(uint8_t t) { this->transport_ = t; }
-  void add_icomm_host(const char *host) { this->icomm_hosts_.push_back(host); }
+  void add_icomm_host(const char *host) {
+    this->icomm_hosts_.push_back(host);
+    this->icomm_config_hosts_.push_back(host);
+  }
   void set_icomm_port(uint16_t port) { this->icomm_port_ = port; }
   void set_icomm_connection(uint8_t conn) { this->icomm_conn_ = conn; }
   void set_icomm_name(const char *name) { this->icomm_name_ = name; }
+  // Runtime settings (e.g. from template text / select entities in the release firmware).
+  // set_icomm_server: an IP address replaces icomm_hosts; an empty string goes back to the YAML's icomm_hosts.
+  void set_icomm_server(const std::string &host);
+  // set_transport_mode: 0 serial, 1 icomm, 2 auto (same order as the `transport` option).
+  void set_transport_mode(uint8_t transport);
   void add_device(uint8_t address);
 
 #ifdef USE_SENSOR
@@ -322,10 +331,12 @@ class GenesisBus : public Component, public uart::UARTDevice {
   // iComm client
   bool active_icomm_{false};
   StaticVector<const char *, MAX_ICOMM_HOSTS> icomm_hosts_;
+  StaticVector<const char *, MAX_ICOMM_HOSTS> icomm_config_hosts_;  // from YAML, restored by set_icomm_server("")
   uint8_t icomm_host_idx_{0};
   uint16_t icomm_port_{20000};
   uint8_t icomm_conn_{1};
   const char *icomm_name_{nullptr};  // nullptr = "ESPHome <friendly name> <MAC suffix>"
+  char icomm_server_[16]{};          // runtime iComm server (set_icomm_server), dotted IPv4
   int icomm_fd_{-1};
   bool icomm_connecting_{false};
   bool icomm_ready_{false};
@@ -416,6 +427,8 @@ class GenesisClimate : public climate::Climate, public Component {
   int8_t force_value_{-1};  // fan output ForceValue
   uint32_t last_write_{0};
   uint32_t last_mode_write_{0};
+  bool target_written_{false};  // the settle windows only apply after our own writes
+  bool mode_written_{false};
 };
 #endif
 

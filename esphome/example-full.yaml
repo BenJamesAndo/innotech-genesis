@@ -16,7 +16,8 @@
 # Wiring options (pick one in `innotech_genesis: uart_id:`)
 #   * uart_rs485 -> the controllers' NET +/-/SCN terminals.
 #     Don't leave another bus master (e.g. an iComm server's CONV232) on the bus at the same time unless `polling: false`.
-#   * uart_rs232 -> one controller's front DB9 port (that controller only; it drops off the Net while it's used).
+#   * uart_rs232 -> one controller's front DB9 port (that controller only; while it's plugged in, that controller
+#     stops talking on the RS485 Net, so iComm sees it as Dead).
 #
 # Protocol notes: docs/PROTOCOL.md. Block numbers below = controller sequence numbers (iComm web block id + 1).
 
@@ -64,7 +65,9 @@ captive_portal:
 
 uart:
   - id: uart_rs485
-    tx_pin: GPIO3
+    tx_pin:
+      number: GPIO3
+      ignore_strapping_warning: true  # the T-RSS3 wires RS485 TX to GPIO3
     rx_pin: GPIO2
     baud_rate: 9600
     rx_buffer_size: 1024

@@ -12,20 +12,21 @@ Innotech don't support this gear or offer the software anymore, so hopefully thi
 - Cooling and heating demand per zone, chilled water valve %, fan status, after hours and fire alarm inputs
 - Scan a controller and log every block (number, type, name, values), which is how you find the block numbers for your site
 - Talk to the bus directly over RS485, or through an existing iComm server over TCP like Supervisor does, or switch between the two automatically
-- A TCP bridge on port 10001 so iComm and Supervisor can still reach the bus through the ESP
+- A TCP bridge on port 10001 so an iComm server can use the ESP as its connection to the bus (set up a TCP/IP connection in iComm pointing at the ESP). Supervisor still connects to iComm, not to the ESP directly
 
 ## Hardware
 
 I'm using a [LilyGO T-RSS3](https://github.com/Xinyuan-LilyGO/T-RSS3) (ESP32-S3 with isolated RS485 and RS232). It runs off 7 to 24 V DC.
 
 - **RS485:** A/B/GND to the controllers' NET +/-/SCN terminals. Don't leave another bus master on the same bus (like an iComm server's CONV232 converter) unless you set `polling: false`.
-- **RS232:** a controller's front DB9 port also works, but only for that one controller, and it drops off the Net while it's plugged in.
+- **RS232:** a controller's front DB9 port also works, but you only see that one controller. While something is plugged into the front port, that controller stops talking on the RS485 Net, so an iComm server or anything else on the Net will see it as Dead.
 
 ## Getting started
 
 1. Download `innotech-genesis-t-rss3.factory.bin` from the [latest release](../../releases/latest) and flash it over USB with [ESPHome Web](https://web.esphome.io).
 2. It starts a hotspot called `innotech-genesis-xxxxxx`. Join it and pick your Wi-Fi.
 3. Home Assistant should discover it. Add it and you'll see which controllers are online.
+   If you've got an iComm server, put its IP in the "iComm server" setting and pick a "Connection mode". Auto uses the serial bus when a controller answers on it and falls back to iComm.
 4. Press the "Scan controller N blocks" buttons and read the block list in the ESPHome log.
 5. Copy [`esphome/example-full.yaml`](esphome/example-full.yaml), change the block numbers to match your scan, and build it in the ESPHome dashboard. Pull the component straight from this repo:
 

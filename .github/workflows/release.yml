@@ -12,9 +12,9 @@ permissions:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Build ESPHome firmware
         id: esphome
@@ -31,7 +31,7 @@ jobs:
           cp "$src/$src.ota.bin" dist/innotech-genesis-t-rss3.ota.bin
           ls -l dist
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: firmware
           path: dist

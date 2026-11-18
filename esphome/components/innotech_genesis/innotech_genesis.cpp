@@ -227,8 +227,43 @@ void GenesisBus::setup() {
   });
 }
 
+static constexpr const char *TRANSPORTS[] = {"serial", "icomm", "auto"};
+
+void GenesisBus::set_icomm_server(const std::string &host) {
+  struct in_addr a {};
+  if (!host.empty() && (host.size() >= sizeof(this->icomm_server_) || inet_aton(host.c_str(), &a) == 0)) {
+    ESP_LOGW(TAG, "iComm server '%s' is not an IPv4 address, ignored", host.c_str());
+    return;
+  }
+  snprintf(this->icomm_server_, sizeof(this->icomm_server_), "%s", host.c_str());
+  // An IP replaces the configured hosts; empty goes back to the ones from the YAML (`icomm_hosts`).
+  this->icomm_hosts_ = this->icomm_config_hosts_;
+  if (!host.empty()) {
+    this->icomm_hosts_.clear();
+    this->icomm_hosts_.push_back(this->icomm_server_);
+  }
+  this->icomm_host_idx_ = 0;
+  this->icomm_last_try_ = 0;
+  if (this->icomm_fd_ >= 0)
+    this->icomm_close_();  // reconnect to the new server
+  ESP_LOGI(TAG, "iComm server: %s", host.empty() ? "from config" : this->icomm_server_);
+}
+
+void GenesisBus::set_transport_mode(uint8_t transport) {
+  if (transport > TRANSPORT_AUTO)
+    return;
+  this->transport_ = transport;
+  if (transport == TRANSPORT_SERIAL && this->active_icomm_) {
+    this->switch_transport_(false);
+  } else if (transport == TRANSPORT_ICOMM && !this->active_icomm_) {
+    this->switch_transport_(true);
+  }
+  ESP_LOGI(TAG, "Transport set to %s", TRANSPORTS[transport]);
+  if (transport == TRANSPORT_ICOMM && this->icomm_hosts_.empty())
+    ESP_LOGW(TAG, "iComm mode but no iComm server is set");
+}
+
 void GenesisBus::dump_config() {
-  static constexpr const char *TRANSPORTS[] = {"serial", "icomm", "auto"};
   ESP_LOGCONFIG(TAG,
                 "Innotech Genesis II bus:\n"
                 "  Transport: %s (now using %s)\n"
@@ -374,12 +409,17 @@ void GenesisBus::send_next_(uint32_t now) {
   if (this->write_stage_ == WS_READ || this->write_stage_ == WS_WRITE || this->write_stage_ == WS_SAVE) {
     this->current_.dst = this->write_job_.address;
     this->current_.len = 0;
-    if (this->write_stage_ == WS_READ) {
+    // Mark the stage as waiting BEFORE transmitting: over iComm a request can fail inside transmit_() (not
+    // connected, send error) and finish_() then sets the next stage. Setting WS_WAIT afterwards would
+    // overwrite that and wedge every later write.
+    const WriteStage stage = this->write_stage_;
+    this->write_stage_ = WS_WAIT;
+    if (stage == WS_READ) {
       this->current_.kind = REQ_WRITE_READ;
       this->current_.drv = DRV_BLOCK;
       this->current_.cmd = CMD_READ_BLOCK;
       this->transmit_(this->write_job_.address, DRV_BLOCK, CMD_READ_BLOCK, &this->write_job_.block, 1, now);
-    } else if (this->write_stage_ == WS_WRITE) {
+    } else if (stage == WS_WRITE) {
       this->current_.kind = REQ_WRITE_BLOCK;
       this->current_.drv = DRV_BLOCK;
       this->current_.cmd = CMD_WRITE_BLOCK;
@@ -390,7 +430,6 @@ void GenesisBus::send_next_(uint32_t now) {
       this->current_.cmd = CMD_SAVE_FLASH;
       this->transmit_(this->write_job_.address, DRV_FLASH, CMD_SAVE_FLASH, nullptr, 0, now);
     }
-    this->write_stage_ = WS_WAIT;
     return;
   }
 
@@ -577,8 +616,8 @@ void GenesisBus::handle_status_(bool ok, uint8_t status, const uint8_t *d, size_
   const bool valid = ok && status == 0 && n > 0xBB;
   const bool running = valid && (d[0xAE] & 0x01) != 0;
   if (this->active_icomm_) {
-    // Serial probe while on iComm: any running controller means the bus is back.
-    if (running) {
+    // Serial probe while on iComm (auto mode only): any running controller means the bus is back.
+    if (running && this->transport_ == TRANSPORT_AUTO) {
       ESP_LOGW(TAG, "Controller %u answers on the serial bus, switching back from iComm", address);
       this->switch_transport_(false);
     }
@@ -928,12 +967,22 @@ void GenesisBus::switch_transport_(bool icomm) {
 void GenesisBus::icomm_close_() {
   if (this->icomm_fd_ >= 0)
     ::close(this->icomm_fd_);
-  if (this->icomm_ready_)
-    ESP_LOGW(TAG, "iComm connection closed");
+  const bool was_ready = this->icomm_ready_;
   this->icomm_fd_ = -1;
   this->icomm_connecting_ = false;
   this->icomm_ready_ = false;
   this->ic_rx_len_ = 0;
+  if (!was_ready)
+    return;
+  ESP_LOGW(TAG, "iComm connection closed");
+  // Whatever closed it (peer, send error, silence, framing), the values are no longer live.
+  if (this->active_icomm_) {
+    for (auto &d : this->devices_)
+      this->set_device_alive_(d.address, false);
+  }
+  // A raw request in flight will never be answered now; fail it instead of waiting out its timeout.
+  if (this->busy_ && this->via_icomm_())
+    this->finish_(false, 0xFF, nullptr, 0);
 }
 
 void GenesisBus::icomm_begin_(uint16_t type) {
@@ -1007,7 +1056,7 @@ void GenesisBus::icomm_send_() {
 
 void GenesisBus::icomm_advise_(size_t first, size_t count) {
   // Advise: i16 count, then 64-byte records: u32 handle, char[16] "conn:dev", char[32] "@blk~field",
-  // u32 min interval, f64 deadband. iComm then pushes type-3 updates (no reply on success).
+  // u32 min interval, f64 deadband. iComm answers with a type-1 reply, then pushes type-3 updates.
   this->icomm_begin_(IC_ADVISE);
   const uint16_t cnt = count;
   this->icomm_put_(&cnt, 2);
@@ -1061,9 +1110,7 @@ void GenesisBus::icomm_raw_(uint8_t dst, uint8_t drv, uint8_t cmd, const uint8_t
   const uint8_t pad = 0;
   this->icomm_put_(len > 0 ? payload : &pad, len > 0 ? len : 1);
   ESP_LOGV(TAG, "iComm raw dst=%u drv=%02X cmd=%02X len=%u", dst, drv, cmd, (unsigned) len);
-  this->icomm_send_();
-  if (this->icomm_fd_ < 0)
-    this->finish_(false, 0xFF, nullptr, 0);
+  this->icomm_send_();  // on a send error icomm_close_() fails this request
 }
 
 void GenesisBus::icomm_loop_(uint32_t now) {
@@ -1147,6 +1194,8 @@ void GenesisBus::icomm_loop_(uint32_t now) {
     this->icomm_send_();
     this->icomm_advise_next_ = 0;  // subscriptions go out one batch at a time (below), not all at once
     this->icomm_advise_waiting_ = false;
+    for (auto &p : this->points_)
+      p.readvise = false;  // the batches cover every point with its current field name
     return;
   }
 
@@ -1158,8 +1207,6 @@ void GenesisBus::icomm_loop_(uint32_t now) {
     ssize_t n = ::recv(this->icomm_fd_, this->ic_rx_ + this->ic_rx_len_, space, MSG_DONTWAIT);
     if (n == 0 || (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK)) {
       this->icomm_close_();
-      for (auto &d : this->devices_)
-        this->set_device_alive_(d.address, false);
       return;
     }
     if (n < 0)
@@ -1273,8 +1320,12 @@ void GenesisBus::icomm_handle_(const uint8_t *m, size_t len) {
         if (o < len)
           v = m[o];
         break;
-      default:
+      case 0:  // no value (error statuses such as "bad field" arrive like this)
         break;
+      default:
+        // Unknown variant: its length is unknown, so the rest of this batch can't be parsed.
+        ESP_LOGD(TAG, "iComm update with unknown value type %u, skipping the rest of the batch", dtype);
+        return;
     }
     o += vlen;
     if (h < IC_HANDLE_BASE)
@@ -1486,7 +1537,9 @@ void GenesisClimate::on_point(uint8_t role, float value, bool valid) {
       break;
     }
     case ROLE_TARGET:
-      if (valid && (int32_t) (App.get_loop_component_start_time() - this->last_write_) > (int32_t) CLIMATE_WRITE_SETTLE_MS &&
+      if (valid &&
+          (!this->target_written_ || (int32_t) (App.get_loop_component_start_time() - this->last_write_) >
+                                         (int32_t) CLIMATE_WRITE_SETTLE_MS) &&
           (std::isnan(this->target_temperature) || std::fabs(value - this->target_temperature) >= 0.01f)) {
         this->target_temperature = value;
         changed = true;
@@ -1513,8 +1566,10 @@ void GenesisClimate::on_point(uint8_t role, float value, bool valid) {
   }
   // Re-check on every update (iComm only pushes Forced when it changes), but not right after our own write:
   // the controller can still report the old override for a few seconds.
-  if (this->fan_output_block_ != 0 && this->forced_ >= 0 &&
-      (int32_t) (App.get_loop_component_start_time() - this->last_mode_write_) > (int32_t) CLIMATE_WRITE_SETTLE_MS) {
+  // Forced with ForceValue not read yet can't be told apart (off vs on), so wait for both.
+  if (this->fan_output_block_ != 0 && (this->forced_ == 0 || (this->forced_ == 1 && this->force_value_ >= 0)) &&
+      (!this->mode_written_ ||
+       (int32_t) (App.get_loop_component_start_time() - this->last_mode_write_) > (int32_t) CLIMATE_WRITE_SETTLE_MS)) {
     const climate::ClimateMode m = this->mode_from_override_();
     if (m != this->mode) {
       this->mode = m;
@@ -1545,6 +1600,7 @@ void GenesisClimate::control(const climate::ClimateCall &call) {
     this->bus_->write_user_variable(this->address_, this->setpoint_block_, t);
     this->target_temperature = t;
     this->last_write_ = now;
+    this->target_written_ = true;
   }
   if (call.get_mode().has_value()) {
     const climate::ClimateMode want = *call.get_mode();
@@ -1555,11 +1611,13 @@ void GenesisClimate::control(const climate::ClimateCall &call) {
       this->bus_->force_output(this->address_, this->fan_output_block_, FORCE_OFF);
       this->mode = climate::CLIMATE_MODE_OFF;
       this->last_mode_write_ = now;
+      this->mode_written_ = true;
     } else if (this->mode != climate::CLIMATE_MODE_AUTO || this->forced_ == 1) {
       // Auto: hand the fan back to its schedule / switch logic. Also clears a force-on.
       this->bus_->force_output(this->address_, this->fan_output_block_, FORCE_RELEASE);
       this->mode = climate::CLIMATE_MODE_AUTO;
       this->last_mode_write_ = now;
+      this->mode_written_ = true;
     }
   }
   this->publish_state();

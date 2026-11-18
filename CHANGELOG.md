@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-11-19
+
+### Added
+
+- "iComm server" and "Connection mode" settings in the release firmware, so the iComm server IP and serial / iComm / auto can be set from Home Assistant or the web page without rebuilding. Backed by new `set_icomm_server()` and `set_transport_mode()` methods. An empty iComm server goes back to the YAML's `icomm_hosts`.
+- Release firmware shows "Using iComm server" and "iComm connected", and the status LED shows the iComm states again.
+
+### Fixed
+
+- A write or override attempted while the iComm connection was down could leave the write queue stuck, so later setpoint changes and overrides were silently ignored until a reboot.
+- In iComm mode, controllers now show offline as soon as the iComm connection drops for any reason (send failure, silence, framing), not only when the server closes it.
+- A forced `icomm` connection mode could switch itself back to serial if a late serial reply arrived; only `auto` switches now.
+- A force read before its ForceValue arrived could briefly show Off for a forced-on fan.
+- After a reboot, setpoints from the controller were ignored for 15 seconds even though nothing had been written.
+- iComm updates with a value type it doesn't know no longer misread the rest of the batch.
+- The iComm client socket is always reserved, so a server set at runtime has one even when `icomm_hosts` is empty.
+- `max_points_per_message` is limited to 30, the size the request buffer holds.
+- GPIO3 strapping pin warning (the T-RSS3 wires RS485 TX to GPIO3).
+- Build workflow uses Node 24 versions of the GitHub actions and a pinned Ubuntu runner.
+
 ## [1.0.0] - 2026-11-18
 
 ### Added
@@ -30,5 +50,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Python tools for the frame codec, capture decoding, an iComm client, raw requests, a TCP relay and Gen2Xtract log decoding.
 - GitHub Actions workflow that builds the firmware and attaches it to each release.
 
-[Unreleased]: https://github.com/BenJamesAndo/innotech-genesis/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/BenJamesAndo/innotech-genesis/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/BenJamesAndo/innotech-genesis/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/BenJamesAndo/innotech-genesis/releases/tag/v1.0.0
